@@ -1,0 +1,45 @@
+x_min: 0.0
+x_max: 10.0
+y_min: -5.0
+y_max: 5.0
+z_min: 0.0
+z_max: 2.0
+traj_idx: 13
+ 
+use_gamma_correction: false
+use_gaussian_blur: true
+use_undistort_correction: true
+debug_mode: false
+
+intrinsics:
+  - 730.271578753826
+  - 729.707285068689
+  - 610.90462936767
+  - 537.715474717007
+
+distortion_coeffs:
+  - -0.0559502131995934 
+  - 0.123761456061624
+  - 0.00114530935813615
+  - -0.00367111451580028
+  - -0.0636070725936968
+
+# extrinsics matrix from coda: https://github.com/ut-amrl/coda-devkit/blob/main/docs/DATA_REPORT.md
+  # data: [
+  #   -0.0050614, -0.9999872, 0.0000000, 0.03,
+  # -0.1556502,  0.0007878, -0.9878119, -0.05,
+  #  0.9877993, -0.0049997, -0.1556522, 0,
+  #   0, 0, 0, 1 ]
+
+# these are wrong! We actually use manually defined extrinsics (above)
+# for some reason the coda extrinsics are 4x4, but here we are assuming 3x4
+translation_vector:
+  - 0.03
+  - -0.05
+  - 0
+
+input_width: 1224
+input_height: 1024
+
+# monocular depth estimation stuff
+metric_3d_model: metric3d_vit_small
