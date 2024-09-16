@@ -1,4 +1,3 @@
-
 import yaml
 import torch
 import cv2
@@ -7,313 +6,19 @@ import json
 import os
 import sys
 import argparse
-from typing import List, Tuple
+from typing import List, Tuple, Dict
+
+import bbox_estimation
+import bbox_matching 
+from metric_depth import get_depth_estimate, get_3d_points
+from utils import Sample, Bbox2d, Bbox3d, compute_2d_iou, compute_centroid_error
 import open3d as o3d
 
 sys.path.append(os.getcwd())
-from helpers.geometry import projectPointsWithDist, get_pointsinfov_mask, get_3dbbox_corners
-
-# @torch.jit.script
-def model_inference(model: torch._dynamo.eval_frame.OptimizedModule, rgb: torch.Tensor) -> torch.Tensor:
-    with torch.no_grad():
-        pred_depth, confidence, output_dict = model.inference({'input': rgb})
-    return pred_depth
-
-@torch.jit.script
-def postprocess_depth(pred_depth: torch.Tensor, pad_info: List[int], input_size: Tuple[int, int], intrinsic: List[float]) -> torch.Tensor:
-    # Unpadding
-    pred_depth = pred_depth.squeeze()
-    pred_depth = pred_depth[pad_info[0]:pred_depth.shape[0] - pad_info[1], pad_info[2]:pred_depth.shape[1] - pad_info[3]]
-
-    # Upsample to original size
-    pred_depth = torch.nn.functional.interpolate(pred_depth[None, None, :, :], input_size, mode='bilinear').squeeze()
-
-    # De-canonical transform
-    canonical_to_real_scale = intrinsic[0] / 1000.0  # 1000.0 is the focal length of the canonical camera
-    pred_depth = pred_depth * canonical_to_real_scale  # Now the depth is metric
-
-    # Clamp the depth values to a maximum of 300 meters
-    pred_depth = torch.clamp(pred_depth, 0, 300)
-
-    return pred_depth
-
-# @torch.jit.script
-def frame_np_to_torch_with_pad_info(frame, mean: torch.Tensor, std: torch.Tensor, 
-                                    padding: List[float], pad_h: int, pad_w: int, pad_h_half: int, pad_w_half: int) -> torch.Tensor:
-    rgb = frame[:, :, ::-1] # not sure if necessary -- need to check
-    rgb = cv2.copyMakeBorder(rgb, pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half, cv2.BORDER_CONSTANT, value=padding)
-    rgb = torch.from_numpy(rgb.transpose((2, 0, 1))).float()
-    rgb = torch.div((rgb - mean), std)
-    rgb = rgb[None, :, :, :]
-    rgb = rgb.cuda() if torch.cuda.is_available() else rgb
-    return rgb
-
-def get_depth_estimate(frames: List[np.array], intrinsics: List[float], model: torch._dynamo.eval_frame.OptimizedModule,
-                       mean: torch.Tensor, std: torch.Tensor,  
-                       pad_info: List[float], input_size: Tuple[int, int],
-                       padding: List[float], pad_h: int, pad_w: int, pad_h_half: int, pad_w_half: int) -> torch.Tensor:
-    batch_rgb = []
-    
-    if type(frames) != list:
-        frames = [frames]
-
-    for frame in frames:
-        rgb = frame_np_to_torch_with_pad_info(frame, mean, std, padding, pad_h, pad_w, pad_h_half, pad_w_half)
-        batch_rgb.append(rgb)
-        
-    batch_rgb = torch.cat(batch_rgb, dim=0)
-
-    # pred_depths = [model_inference(model, rgb) for rgb in batch_rgb]
-    
-    pred_depths = model_inference(model, batch_rgb)
-
-    processed_depths = []
-    for i in range(len(frames)):
-        pred_depth = postprocess_depth(pred_depths[i], pad_info, input_size, intrinsics)
-        processed_depths.append(pred_depth)
-        
-    avg_depth = torch.stack(processed_depths).mean(dim=0)
-
-    return avg_depth
-
-@torch.jit.script
-def swap_camera_axes(points_3d: torch.Tensor) -> torch.Tensor:
-    """
-    Swaps the axes of the 3D points so that:
-    - X-axis becomes depth distance
-    - Z-axis becomes height
-    - Y-axis remains unchanged
-
-    Parameters:
-    - points_3d (torch.Tensor): 3D points of shape (N, 3).
-
-    Returns:
-    - torch.Tensor: 3D points with swapped axes of shape (N, 3).
-    """
-    
-    # Swap the axes
-    # swapped_points = torch.stack([points_3d[:, 2],  # Z (height) becomes X (depth)
-    #                               points_3d[:, 1],  # X becomes Y
-    #                               points_3d[:, 0]], # Y becomes Z
-    #                              dim=1)
-    
-    swapped_points = torch.stack([points_3d[:, 2],  # Z (height) becomes X (depth)
-                                  points_3d[:, 0],  # X becomes Y
-                                  points_3d[:, 1]], # Y becomes Z
-                                 dim=1)
-    
-    return swapped_points
-
-@torch.jit.script
-def get_3d_points(depth: torch.Tensor, 
-                  inv_camera_matrix: torch.Tensor, 
-                  extrinsics: torch.Tensor) -> torch.Tensor:
-    """
-    Transforms depth map into 3D points in world coordinates.
-
-    Parameters:
-    - depth (torch.Tensor): Depth map of shape (H, W).
-    - inv_camera_matrix (torch.Tensor): Inverse camera intrinsic matrix of shape (3, 3).
-    - extrinsics (torch.Tensor): Extrinsic matrix of shape (4, 4) for transforming from camera to world coordinates.
-
-    Returns:
-    - torch.Tensor: 3D points in world coordinates of shape (H * W, 3).
-    """
-    
-    # Get height and width of the depth map
-    # depth = depth.T
-    H, W = depth.shape
-    # depth = torch.ones_like(depth)
-
-    # Create a meshgrid for pixel coordinates
-    y, x = torch.meshgrid(torch.arange(H, device=depth.device), torch.arange(W, device=depth.device), indexing='ij')
-    
-    # Flatten x, y and depth
-    x = x.flatten()
-    y = y.flatten()
-    depth_flat = depth.flatten()
-    
-    # Create homogeneous pixel coordinates
-    homogeneous_pixel_coords = torch.stack((x, y, torch.ones_like(x)), dim=1).float()
-
-    # Transform pixel coordinates to camera coordinates
-    camera_coords = inv_camera_matrix @ homogeneous_pixel_coords.T
-    camera_coords = camera_coords.T  # shape (H*W, 3)
-    
-    # Reverse the sign of the depth values if depth is inversely related to distance
-    # Comment out the line below if depth directly represents distance
-    depth_flat = depth_flat
-    
-    # Multiply by the depth to get 3D points in camera coordinates
-    camera_coords *= depth_flat.unsqueeze(1)
-    
-    M = torch.eye(3, device=depth.device)
-    M[0, 0] = -1.0
-    M[1, 1] = -1.0
-    camera_coords = torch.matmul(M, camera_coords.T).T
-
-    # Convert camera coordinates to homogeneous coordinates (H*W, 4)
-    camera_coords_homogeneous = torch.cat([camera_coords, torch.ones((camera_coords.shape[0], 1), device=depth.device)], dim=1)
-
-    # world points without extrinsics
-    world_coords = camera_coords_homogeneous[:, :3]
-    world_coords = swap_camera_axes(world_coords)
-    world_coords += extrinsics[:3, 3].to(depth.device)
-
-    # Transform 3D points from camera to world coordinates using the extrinsic matrix
-    # world_coords_homogeneous = (extrinsics @ camera_coords_homogeneous.T).T
-    
-    # Discard the homogeneous coordinate to get the final 3D points in world coordinates
-    # world_coords = camera_coords_homogeneous[:, :3]
-
-    return world_coords
-
-def get_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
-    fx, fy, cx, cy = intrinsics
-    camera_matrix = torch.tensor([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=torch.float32)
-    return camera_matrix
-
-def get_inverse_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
-    camera_matrix = get_camera_matrix(intrinsics)
-    inv_camera_matrix = torch.inverse(camera_matrix)
-    return inv_camera_matrix
-
-# save 2d bounding box and also 3d location
-class Bbox2d:
-    def __init__(self, x: float, y: float, w: float, h: float,
-                 cX: float, cY: float, cZ: float):
-        self.x = x
-        self.y = y
-        self.w = w
-        self.h = h
-        self.cX = cX
-        self.cY = cY
-        self.cZ = cZ
-
-class Bbox3d:
-    def __init__(self, cX: float, cY: float, cZ: float, 
-                 w: float, h: float, l: float, 
-                 r:float, p:float, y: float):
-        self.cX = cX
-        self.cY = cY
-        self.cZ = cZ
-        self.h = h
-        self.w = w
-        self.l = l
-        self.r = r
-        self.p = p
-        self.y = y
-    
-    def to_dict(self):
-        return {
-            'cX': self.cX,
-            'cY': self.cY,
-            'cZ': self.cZ,
-            'w': self.w,
-            'h': self.h,
-            'l': self.l,
-            'r': self.r,
-            'p': self.p,
-            'y': self.y
-        }
-        
-    # requires projecting the 3D bounding box to 2D
-    def get_bbox2d(self, instrinsics_mat: np.array, distortion_coeffs: np.array, extrinsics: np.array):
-        
-        assert type(instrinsics_mat) == np.ndarray
-        assert type(distortion_coeffs) == np.ndarray
-        assert type(extrinsics) == np.ndarray
-        
-        # get corner points based on center points and dimensions
-        x_min, x_max = self.cX - self.w/2, self.cX + self.w/2
-        y_min, y_max = self.cY - self.l/2, self.cY + self.l/2
-        z_min, z_max = self.cZ - self.h/2, self.cZ + self.h/2
-        
-        pc_np = np.array([
-            [x_min, y_min, z_min],
-            [x_min, y_min, z_max],
-            [x_min, y_max, z_min],
-            [x_min, y_max, z_max],
-            [x_max, y_min, z_min],
-            [x_max, y_min, z_max],
-            [x_max, y_max, z_min],
-            [x_max, y_max, z_max]
-        ])
-        
-        ext_homo_mat = extrinsics
-
-        np.set_printoptions(suppress=True)
-        #Load projection, rectification, distortion camera matrices
-
-        K   = instrinsics_mat
-        d   = distortion_coeffs
-        
-        ext_homo_mat = np.array([[-3.2457400e-02, -9.9947312e-01, -5.0000000e-08,  8.0000000e-02],
-                    [-1.4228826e-01,  4.6207900e-03, -9.8981448e-01, -1.0000000e-01],
-                    [ 9.8929296e-01, -3.2126800e-02, -1.4236327e-01, -3.0000000e-02],
-                    [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00]])
-
-        image_points = projectPointsWithDist(pc_np[:, :3].astype(np.float64), ext_homo_mat[:3, :3], 
-            ext_homo_mat[:3, 3], K, d)
-
-        valid_points_mask = get_pointsinfov_mask(
-            (ext_homo_mat[:3, :3] @ pc_np[:, :3].T).T + ext_homo_mat[:3, 3])
-        
-        assert len(image_points) == len(pc_np)
-        
-        image_points = image_points[valid_points_mask]
-        
-        if len(image_points) == 0:
-            return Bbox2d(x=-1, y=-1, w=0, h=0,
-                  cX=self.cX, cY=self.cY, cZ=self.cZ)
-        
-        y_max = np.max(image_points[:, 0]).astype(int)
-        y_min = np.min(image_points[:, 0]).astype(int)
-        x_max = np.max(image_points[:, 1]).astype(int)
-        x_min = np.min(image_points[:, 1]).astype(int)
-        
-        x, y = x_min, y_min
-        w, h = x_max - x_min, y_max - y_min
-        
-        return Bbox2d(x=x, y=y, w=w, h=h,
-                      cX=self.cX, cY=self.cY, cZ=self.cZ)
-
-class Entity:
-    def __init__(self, data: dict):
-        self.name = data['classId']
-        self.id = data['instanceId']
-        self.bbox3d = Bbox3d(
-            data['cX'],
-            data['cY'],
-            data['cZ'],
-            data['w'],
-            data['h'],
-            data['l'],
-            data['r'],
-            data['p'],
-            data['y']
-        )
-
-class Sample:
-    def __init__(self, rgb_image_filepath: str, objects: dict):
-        self.rgb_image_filepath: str = rgb_image_filepath
-        self.objects: List[Entity] = [Entity(obj) for obj in objects]
-        # also create mapping from instanceId to Entity
-        self.instance_id_to_entity = {obj.id: obj for obj in self.objects}
-
-    def get_img(self):
-        return cv2.imread(self.rgb_image_filepath)
-    
-class Estimate:
-    def __init__(self, x, y, z, lart_tracking_id, lart_bounding_box):
-        self.x = x
-        self.y = y
-        self.z = z
-        self.lart_tracking_id = lart_tracking_id
-        self.lart_bounding_box = lart_bounding_box
+from utils import get_camera_matrix
 
 class ObjectLocalizationEvaluator:
-    def __init__(self, config_filepath):
+    def __init__(self, config_filepath, model):
         # Load the configuration file
         if config_filepath:
             with open(config_filepath, "r") as file:
@@ -323,6 +28,10 @@ class ObjectLocalizationEvaluator:
         self.use_gaussian_blur = config["use_gaussian_blur"]
         self.use_undistort_correction = config["use_undistort_correction"]
         self.metric_3d_model = config["metric_3d_model"]
+        bbox_estimation_method = getattr(bbox_estimation, config["bbox_estimation"])
+        self.bbox_estimation = bbox_estimation_method(**config["bbox_estimation_config"])
+        bbox_matching_method = getattr(bbox_matching, config["bbox_matching"])
+        self.bbox_matching = bbox_matching_method(**config["bbox_matching_config"])
         
         self.grid_x_min, self.grid_x_max = config["x_min"], config["x_max"]
         self.grid_y_min, self.grid_y_max = config["y_min"], config["y_max"]
@@ -336,27 +45,21 @@ class ObjectLocalizationEvaluator:
             self.grid_z_max,
         ]
         self.traj_idx = config["traj_idx"]
+        
+        self.input_width = config["input_width"]
+        self.input_height = config["input_height"]
+
+        self.distortion_coeffs = np.array(config["distortion_coeffs"])
+        self.translation_vector = torch.tensor(config["translation_vector"])
 
         self.intrinsics = config["intrinsics"]
-        self.inv_camera_matrix = get_inverse_camera_matrix(self.intrinsics)
+        self.camera_matrix = get_camera_matrix(self.intrinsics)
+        self.inv_camera_matrix = torch.inverse(self.camera_matrix)
         self.inv_camera_matrix = (
             self.inv_camera_matrix.cuda()
             if torch.cuda.is_available()
             else self.inv_camera_matrix
         )
-        self.input_width = config["input_width"]
-        self.input_height = config["input_height"]
-
-        self.camera_matrix = np.array(
-            [
-                [self.intrinsics[0], 0, self.intrinsics[2]],  # fx, 0, cx
-                [0, self.intrinsics[1], self.intrinsics[3]],  # 0, fy, cy
-                [0, 0, 1],
-            ]
-        )
-
-        self.distortion_coeffs = np.array(config["distortion_coeffs"])
-        self.translation_vector = torch.tensor(config["translation_vector"])
 
         # Assuming no rotation, identity rotation matrix (3x3)
         rotation_matrix = torch.eye(3)
@@ -392,7 +95,6 @@ class ObjectLocalizationEvaluator:
         self.pad_h_half = self.pad_h // 2
         self.pad_w_half = self.pad_w // 2
         
-        
         # make sure our pad info make sure for the input size...
         # pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half
         assert self.pad_h_half >= 0, 'Pad height half must be greater than or equal to 0.'
@@ -422,7 +124,7 @@ class ObjectLocalizationEvaluator:
             data = json.load(file)
             self.lart_tracking_id_to_coda_id = data
 
-        # Load the model
+        # Load the metric depth estimation model
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = torch.hub.load(
             "yvanyin/metric3d",
@@ -434,24 +136,80 @@ class ObjectLocalizationEvaluator:
         self.model = self.model.to(self.device)
         self.model = torch.compile(self.model)
 
+    def compute_bbox_errors(self, bbox2d_list: List[Bbox2d], 
+                            bbox3d_list: List[Bbox3d], 
+                            bbox2d_labels: List[Bbox2d],
+                            bbox3d_labels: List[Bbox3d],
+                            matched_ids: Dict[int, int]) -> Tuple[List[float], List[float]]:
+        """
+        Compute the errors between estimated and ground truth bounding boxes.
+
+        Args:
+            bbox2d_list (List[Bbox2d]): List of estimated 2D bounding boxes.
+            bbox3d_list (List[Bbox3d]): List of estimated 3D bounding boxes.
+            bbox2d_labels (List[Bbox2d]): List of ground truth 2D bounding boxes.
+            bbox3d_labels (List[Bbox3d]): List of ground truth 3D bounding boxes.
+            matched_ids (Dict[int, int]): Dictionary mapping estimated bbox ids to ground truth ids.
+
+        Returns:
+            Tuple[List[float], List[float]]: Lists of 2D and 3D errors for matched bounding boxes.
+        """
+        errors_2d = []
+        errors_3d = []
+
+        for estimated_id, label_id in matched_ids.items():
+            # Compute 2D IoU
+            bbox2d_estimated = bbox2d_list[estimated_id]
+            bbox2d_label = bbox2d_labels[label_id]
+            iou_2d = compute_2d_iou(bbox2d_estimated, bbox2d_label)
+            errors_2d.append(1 - iou_2d)  # Error is 1 - IoU
+
+            # Compute 3D centroid 
+            bbox3d_estimated = bbox3d_list[estimated_id]
+            bbox3d_label = bbox3d_labels[label_id]
+            centroid_error_3d = compute_centroid_error(bbox3d_estimated, bbox3d_label)
+            errors_3d.append(centroid_error_3d)
+
+        return errors_2d, errors_3d
+    
+    def extract_labels(self):
+        # TODO: Implement extract_labels method
+        # This method should extract 2D and 3D bounding boxes, and tracking IDs from the samples
+        # It should return:
+        # - bbox2d_labels: List of ground truth 2D bounding boxes
+        # - bbox3d_labels: List of ground truth 3D bounding boxes
+        # - tracking_ids: List of tracking IDs for the ground truth objects
+        pass
+
     def evaluate(self):
         frame_indices = self.get_viable_samples()
         samples = self.load_samples(frame_indices)
+
+        # estimate 2D and 3D bounding boxes 
+        bbox2d_list, bbox3d_list = self.bbox_estimation.estimate(samples)
+
+        # get ground truth 2D, 3D bounding boxes, and tracking ids from data
+        bbox2d_labels, bbox3d_labels, tracking_ids = self.extract_labels(samples)
+
+        # Match estimated and ground truth bounding boxes
+        # matched_ids is a dictionary where:
+        # - keys are the estimated bounding box ids (indices in the estimated bbox list)
+        # - values are the corresponding ground truth ids
+        matched_ids = self.bbox_matching.matching(bbox2d_list, bbox3d_list, bbox2d_labels, bbox3d_labels, tracking_ids)
+
+        # Compute errors between estimaed and ground truth bounding boxes
+        errors_2d, errors_3d = self.compute_bbox_errors(bbox2d_list, bbox3d_list, bbox2d_labels, bbox3d_labels, matched_ids)
+
+        # Process and analyze the errors
+        mean_error_2d = np.mean(errors_2d)
+        mean_error_3d = np.mean(errors_3d)
         
-        def get_3d_estimation_in_bbox(frame, point_cloud, bbox, inner_bbox=True):
-            # need some way to select the points that are in a bbox
-            bbox_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
-            # dummy example
-            x, y, w, h = bbox.x, bbox.y, bbox.w, bbox.h
-            if inner_bbox: # then get inside region
-                h = h // 2
-                w = w // 2
-                x = x + h // 2
-                y = y + w // 2
-            bbox_mask[x:x+w, y:y+h] = 1
-            return point_cloud[bbox_mask.flatten() == 1].mean(dim=0)
+        return mean_error_2d, mean_error_3d
+    
+    def visualize_point_cloud(self):
+        frame_indices = self.get_viable_samples()
+        samples = self.load_samples(frame_indices)
         
-        # ... do some evaluation here
         for sample in samples:
             # let's get the 3d point cloud and visualize it :)
             frame = sample.get_img()
@@ -508,9 +266,6 @@ class ObjectLocalizationEvaluator:
             o3d.visualization.draw_geometries(
                 [point_cloud, axis] + reference_pts
             )
-
-        
-        # we will need to use lart tracking id to coda id mapping
         
         # save selected samples
         self.save_selected_samples(samples)
