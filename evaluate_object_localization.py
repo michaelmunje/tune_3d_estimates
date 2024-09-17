@@ -9,11 +9,10 @@ import argparse
 from typing import List, Tuple, Dict
 
 import bbox_and_bev_estimation
-from bbox_and_bev_estimation import LartBBoxAndBevEstimation
 import bbox_matching 
-from metric_depth import get_depth_estimate, get_3d_points
 from utils import Sample, Location, Bbox3d, compute_2d_iou, compute_centroid_error
 import open3d as o3d
+from matplotlib import pyplot as plt
 
 sys.path.append(os.getcwd())
 from utils import get_camera_matrix
@@ -33,6 +32,7 @@ class ObjectLocalizationEvaluator:
         self.bbox_and_bev_estimation = bbox_and_bev_estimation_method(config)
         bbox_matching_method = getattr(bbox_matching, config["bbox_matching"])
         self.bbox_matching = bbox_matching_method(**config["bbox_matching_config"])
+        self.lart_folder = config["lart_folder"]
         
         self.sample_save_folder = config["sample_save_folder"]
         self.camera_matrix_np = self.bbox_and_bev_estimation.camera_matrix_np
@@ -53,10 +53,6 @@ class ObjectLocalizationEvaluator:
         self.traj_idx = config["traj_idx"]
         
         assert type(self.traj_idx) == int, 'Trajectory index must be an integer. Otherwise, you\'ll need to modify this dict below.' 
-        self.lart_tracking_id_to_coda_id = {}
-        with open('corresponding_trackings.json', 'r') as file:
-            data = json.load(file)
-            self.lart_tracking_id_to_coda_id = data
 
     def compute_bbox_errors(self, bbox2d_list: List[Location], 
                             bbox2d_labels: List[Location],
@@ -114,59 +110,134 @@ class ObjectLocalizationEvaluator:
         # - keys are the estimated bounding box ids (indices in the estimated bbox list)
         # - values are the corresponding ground truth ids
         matched_ids = self.bbox_matching.matching(location_estimates, bbox2d_labels, bbox3d_labels)
-        
-        bev_labels_with_keys = {}
-        for tracking_id, bev_label in zip(tracking_ids, bev_labels):
-            bev_labels_with_keys[tracking_id] = bev_label
-            
-        bev_estimates_with_keys = {}
-        for loc_estimate in location_estimates:
-            tracking_id = loc_estimate.tracking_id
-            bev_estimates_with_keys[tracking_id] = np.array([loc_estimate.cX, loc_estimate.cY])
 
         # Compute errors between estimated and ground truth bounding boxes
         # matched_ids is a dictionary where:
         # - keys are the estimated bounding box ids (indices in the estimated bbox list)
         # - values are the corresponding ground truth ids
         
-        # errors_2d = self.compute_bbox_errors(bbox2d_list, bbox2d_labels, matched_ids)
-        errors_bev = self.compute_bev_errors(bev_estimates_with_keys, bev_labels_with_keys, matched_ids)
+        # let's first group by sample
+        loc_estimates_by_sample = {} # key is sample filepath, value is a dict tracking_id -> bev_estimate
+        for loc_estimates_for_sample in location_estimates:
+            sample_filepath = loc_estimates_for_sample[0].sample_filepath
+            if sample_filepath not in loc_estimates_by_sample:
+                loc_estimates_by_sample[sample_filepath] = {}
+            for loc_estimate in loc_estimates_for_sample:
+                loc_estimates_by_sample[sample_filepath][loc_estimate.tracking_id] = loc_estimate
+            
+        loc_labels_by_sample = {} # key is sample filepath, value is a dict tracking_id -> bev_label
+        for sample in samples:
+            sample_filepath = sample.rgb_image_filepath
+            if sample_filepath not in loc_labels_by_sample:
+                loc_labels_by_sample[sample_filepath] = {}
+            for obj in sample.objects:
+                loc_labels_by_sample[sample_filepath][obj.id] = obj.bbox3d
+            
+        errors_over_samples = []
+        
+        for sample_filepath in loc_estimates_by_sample:
+            loc_estimates = loc_estimates_by_sample[sample_filepath]
+            loc_labels = loc_labels_by_sample[sample_filepath]
+            errors_bev = self.compute_bev_errors(loc_estimates, loc_labels, matched_ids)
+            errors_over_samples.extend(errors_bev)
 
         # Process and analyze the errors
-        mean_error_bev = np.mean(errors_bev)
+        mean_error_bev = np.mean(errors_over_samples)
         # mean_error_3d = np.mean(errors_3d)
         
+        if not os.path.exists(self.sample_save_folder):
+            os.makedirs(self.sample_save_folder)
+        
         # let's also save a plot of the bevs
-        self.save_bev_visualization(bev_estimates_with_keys, bev_labels_with_keys, matched_ids, fp='data/bev_visualization.png')
+        for sample_filepath in loc_estimates_by_sample:
+            bev_out_filepath = f'{self.sample_save_folder}/BEV_visualization_{sample_filepath.split("/")[-1]}'
+            self.save_bev_visualization(loc_estimates_by_sample[sample_filepath], 
+                                        loc_labels_by_sample[sample_filepath], 
+                                        matched_ids, fp=bev_out_filepath)
         
         return mean_error_bev
     
-    def save_bev_visualization(self, bev_estimates, bev_labels, matched_ids, fp):
-        # let's also plot bevs
-        self.visualize_bevs(bev_estimates, bev_labels, matched_ids)
-        plt.savefig(fp)
-        
-    def visualize_bevs(self, bev_estimates, bev_labels, matched_ids):
-        plt.figure()
-        plt.scatter(bev_estimates.values(), bev_labels.values(), c='blue', label='Estimated BEV')
-        plt.scatter(bev_labels.values(), bev_labels.values(), c='red', label='Ground Truth BEV')
-        plt.xlabel('Estimated BEV')
-        plt.ylabel('Ground Truth BEV')
-        
-        plt.xlim(self.grid_x_min, self.grid_x_max)
-        plt.ylim(self.grid_y_min, self.grid_y_max)
-        plt.axis('equal')
-        plt.grid(True)
-        
-        plt.title('BEV Estimates and Ground Truth')
-        plt.legend()
-        plt.show()
+    def visualize_2d_bbox_on_image(self, image, x, y, w, h):
+        cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
     
-    def compute_bev_errors(self, bev_estimates, bev_labels, matched_ids):
+    def save_bev_visualization(self, loc_estimates, loc_labels, matched_ids, fp, 
+                               include_2d_bbox_estimate_visualization: bool = True,
+                               include_3d_bbox_label_visualization: bool = False):
+        first_loc_estimate = next(iter(loc_estimates.values()))
+        sample_filepath = first_loc_estimate.sample_filepath
+        # load the image
+        image = cv2.imread(sample_filepath)
+        
+        if include_2d_bbox_estimate_visualization:
+            # visualize the 2d bbox on the image
+            for tracking_id, loc_estimate in loc_estimates.items():
+                if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
+                    x, y, w, h = loc_estimate.x, loc_estimate.y, loc_estimate.w, loc_estimate.h
+                    x, y = int(x), int(y)
+                    w, h = int(w), int(h) 
+                    self.visualize_2d_bbox_on_image(image, x, y, w, h)
+        
+        if include_3d_bbox_label_visualization:
+            raise NotImplementedError
+            # # visualize the 3d bbox on the image
+            # for loc_estimate in loc_estimates:
+            #     loc_estimate.visualize_3d_bbox()
+            
+        # let's also plot bevs
+        self.visualize_bev(loc_estimates, loc_labels, matched_ids)
+        
+        # save side by side with original image and current plot (use temporary file)
+        temp_file = f'{fp}_temp.png'
+        plt.savefig(temp_file)
+        img = cv2.imread(temp_file)
+        os.remove(temp_file)
+        
+        # make plot same height as image but keep aspect ratio
+        new_height = image.shape[0]
+        new_width = int(new_height * img.shape[1] / img.shape[0])
+        img = cv2.resize(img, (new_width, new_height))
+        
+        # add original image to the left
+        img = cv2.hconcat([image, img])
+        
+        cv2.imwrite(fp, img)
+        
+    def visualize_bev(self, loc_estimates, loc_labels, matched_ids):
+        # each estimate (and its corresponding label) should have a different color
+        
+        corresponding_estimates_and_labels = []
+        for tracking_id, loc_estimate in loc_estimates.items():
+            if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
+                bev_estimate = loc_estimate.get_bev_location()
+                bev_label = loc_labels[matched_ids[tracking_id]].get_bev_location()
+                corresponding_estimates_and_labels.append((bev_estimate, bev_label))
+        
+        # now let's plot them
+        fig, ax = plt.subplots()
+        for bev_estimate, bev_label in corresponding_estimates_and_labels:
+            ax.plot(bev_estimate[1], bev_estimate[0], 'bo', label='Estimated')
+            ax.plot(bev_label[1], bev_label[0], 'ro', label='Ground Truth')
+            
+        # expected grid limits
+        ax.set_xlim(self.grid_y_min, self.grid_y_max)
+        ax.set_ylim(self.grid_x_min, self.grid_x_max)
+        ax.set_xlim(ax.get_xlim()[::-1])
+        ax.grid(True)
+        ax.legend()
+        ax.set_title('Bev Visualization')
+        ax.set_ylabel('X (forward)')
+        ax.set_xlabel('Y (left)')
+        ax.set_aspect('equal', 'box')
+        plt.show()
+        
+    
+    def compute_bev_errors(self, location_estimates, location_labels, matched_ids):
         errors = []
         for estimated_id, label_id in matched_ids.items():
-            bev_estimate = bev_estimates[estimated_id]
-            bev_label = bev_labels[label_id]
+            if estimated_id not in location_estimates or label_id not in location_labels:
+                continue
+            bev_estimate = location_estimates[estimated_id].get_bev_location()
+            bev_label = location_labels[label_id].get_bev_location()
             error = np.linalg.norm(bev_estimate - bev_label)
             errors.append(error)
         return errors
@@ -181,12 +252,12 @@ class ObjectLocalizationEvaluator:
     def get_viable_samples(self) -> List[str]:
         # need to make sure they have both a .png and .json file
         viable_frame_indices = []
-        target_folder = f'data/2d_rect/cam0/{self.traj_idx}'
+        target_folder = f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}'
         # iterate over imgs in folder that correspond to our expected filename
         for filename in os.listdir(target_folder):
             if filename.endswith('.png'):
                 frame_idx = filename.split('_')[-1].split('.')[0]
-                json_path = f'data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
+                json_path = f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
                 if os.path.exists(json_path):
                     viable_frame_indices.append(frame_idx)
         return viable_frame_indices
@@ -194,8 +265,8 @@ class ObjectLocalizationEvaluator:
     def load_samples(self, frame_indices):
         samples = []
         for frame_idx in frame_indices:
-            image_path = f'data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
-            json_path = f'data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
+            image_path = f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
+            json_path = f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
             
             with open(json_path, 'r') as file:
                 data = json.load(file)
@@ -221,6 +292,7 @@ class ObjectLocalizationEvaluator:
             img = sample.get_img()
             for obj in sample.objects:
                 bbox2d = obj.bbox3d.get_bbox2d(self.camera_matrix_np, self.distortion_coeffs_np, self.extrinsics_np)
+                bbox2d.tracking_id = obj.id
                 x, y, w, h = bbox2d.x, bbox2d.y, bbox2d.w, bbox2d.h
                 if w == 0 or h == 0 or x == -1 or y == -1:
                     continue

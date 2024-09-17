@@ -40,24 +40,34 @@ def save_all_visuals(lart_data_dir: str, images_dir: str, output_dir: str):
     # only save first 5
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    # order lart files
-    lart_data_paths = sorted(os.listdir(lart_data_dir))
 
-    for lart_data_path in tqdm.tqdm(os.listdir(lart_data_dir)[:5]):
+    def is_desired_lart_file(filename: str) -> bool:
+        if filename.endswith('_907.pkl'):
+            return True
+        elif filename.endswith('_997.pkl'):
+            return True
+        elif filename.endswith('_1054.pkl'):
+            return True
+        elif filename.endswith('_1157.pkl'):
+            return True
+        elif filename.endswith('_1174.pkl'):
+            return True
+        return False
+
+    lart_data_paths = os.listdir(lart_data_dir)
+    lart_data_paths = [lart_data_path for lart_data_path in lart_data_paths if is_desired_lart_file(lart_data_path)]
+
+    for lart_data_path in tqdm.tqdm(lart_data_paths):
         image_filename = lart_data_path.split('.')[0] + '.png'
         image_filepath = os.path.join(images_dir, image_filename)
         lart_data_path = os.path.join(lart_data_dir, lart_data_path)
         save_all_lart_bounding_boxes_for_sample(image_filepath, lart_data_path, output_dir)
-        
-    # save thing for coda
-    coda_data_paths = sorted(os.listdir(coda_bbox_dir))
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Save LART bounding box visuals")
     parser.add_argument("--lart_data_dir", type=str, help="Path to the LART data directory")
-    parser.add_argument("--coda_bbox_dir", type=str, help="Path to the CODA bbox directory")
     parser.add_argument("--images_dir", type=str, help="Path to the images directory")
     parser.add_argument("--output_dir", type=str, help="Path to save the output")
     args = parser.parse_args()

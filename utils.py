@@ -3,6 +3,8 @@ import torch
 import numpy as np
 from typing import List, Tuple
 from geometry import projectPointsWithDist, get_pointsinfov_mask, get_3dbbox_corners
+import os
+import pickle
 
 def get_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
     fx, fy, cx, cy = intrinsics
@@ -18,7 +20,8 @@ def get_inverse_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
 class Location:
     def __init__(self, x: float, y: float, w: float, h: float,
                  cX: float, cY: float, cZ: float,
-                 tracking_id: int):
+                 tracking_id: str,
+                 sample_filepath: str):
         
         # 2b bounding box params
         self.x = x
@@ -32,11 +35,17 @@ class Location:
         self.cZ = cZ
 
         self.tracking_id = tracking_id
+        self.sample_filepath = sample_filepath
+        
+    def get_bev_location(self):
+        return np.array([self.cX, self.cY])
 
 class Bbox3d:
     def __init__(self, cX: float, cY: float, cZ: float, 
                  w: float, h: float, l: float, 
-                 r:float, p:float, y: float):
+                 r:float, p:float, y: float,
+                 sample_filepath: str,
+                 tracking_id: str):
         self.cX = cX
         self.cY = cY
         self.cZ = cZ
@@ -46,6 +55,8 @@ class Bbox3d:
         self.r = r
         self.p = p
         self.y = y
+        self.sample_filepath = sample_filepath
+        self.tracking_id: str = tracking_id
 
     def to_dict(self):
         return {
@@ -61,7 +72,7 @@ class Bbox3d:
         }
 
     def get_bev_location(self):
-        return (self.cX, self.cY)
+        return np.array([self.cX, self.cY])
         
     # requires projecting the 3D bounding box to 2D
     def get_bbox2d(self, instrinsics_mat: np.array, distortion_coeffs: np.array, extrinsics: np.array):
@@ -111,7 +122,7 @@ class Bbox3d:
         
         if len(image_points) == 0:
             return Location(x=-1, y=-1, w=0, h=0,
-                  cX=self.cX, cY=self.cY, cZ=self.cZ)
+                  cX=self.cX, cY=self.cY, cZ=self.cZ, tracking_id=self.tracking_id, sample_filepath=self.sample_filepath)
         
         y_max = np.max(image_points[:, 0]).astype(int)
         y_min = np.min(image_points[:, 0]).astype(int)
@@ -121,7 +132,7 @@ class Bbox3d:
         x, y = x_min, y_min
         w, h = x_max - x_min, y_max - y_min
         
-        return Location(x=x, y=y, w=w, h=h, cX=self.cX, cY=self.cY, cZ=self.cZ)
+        return Location(x=x, y=y, w=w, h=h, cX=self.cX, cY=self.cY, cZ=self.cZ, tracking_id=self.tracking_id, sample_filepath=self.sample_filepath)
     
 def compute_2d_iou(bbox1: Location, bbox2: Location) -> float:
     """Compute the Intersection over Union (IoU) for 2D bounding boxes."""
@@ -148,7 +159,7 @@ def compute_centroid_error(bbox1: Bbox3d, bbox2: Bbox3d) -> float:
     )
 
 class Entity:
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, filepath: str):
         self.name = data['classId']
         self.id = data['instanceId']
         self.bbox3d = Bbox3d(
@@ -161,12 +172,15 @@ class Entity:
             data['r'],
             data['p'],
             data['y'],
+            filepath,
+            data['instanceId']
         )
+        self.filepath = filepath
 
 class Sample:
     def __init__(self, rgb_image_filepath: str, objects: dict, lart_folder: str):
         self.rgb_image_filepath: str = rgb_image_filepath
-        self.objects: List[Entity] = [Entity(obj) for obj in objects]
+        self.objects: List[Entity] = [Entity(obj, rgb_image_filepath) for obj in objects]
         # also create mapping from instanceId to Entity
         self.instance_id_to_entity = {obj.id: obj for obj in self.objects}
         self.lart_folder = lart_folder
@@ -176,7 +190,7 @@ class Sample:
     
     def get_lart_data(self):
         rgb_image_filename = self.rgb_image_filepath.split('/')[-1]
-        lart_filename = rgb_image_filename.replace('.jpg', '.pkl')
+        lart_filename = rgb_image_filename.replace('.png', '.pkl')
         lart_filepath = os.path.join(self.lart_folder, lart_filename)
         with open(lart_filepath, 'rb') as f:
             lart_data = pickle.load(f)

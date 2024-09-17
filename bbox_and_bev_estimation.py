@@ -78,7 +78,7 @@ class LartBBoxAndBevEstimation(BBoxAndBevEstimation):
                 if w == 0 or h == 0:
                     continue
                 
-                estimated_location = Location(x, y, w, h, joint_coords[2], -joint_coords[0], -joint_coords[1], tracking_id)
+                estimated_location = Location(x, y, w, h, joint_coords[2], -joint_coords[0], -joint_coords[1], tracking_id, sample.rgb_image_filepath)
                 estimated_locations.append(estimated_location)
             all_estimated_locations.append(estimated_locations)
         return all_estimated_locations
@@ -169,7 +169,7 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
                 tracking_id = lart_data['tracking_id'][i]
                 
                 avg_3d_location = get_3d_estimation_in_bbox(sample.get_img(), points_3d, bbox2d)
-                estimated_location = Location(x, y, w, h, avg_3d_location[0], avg_3d_location[1], avg_3d_location[2], tracking_id)
+                estimated_location = Location(x, y, w, h, avg_3d_location[0], avg_3d_location[1], avg_3d_location[2], tracking_id, sample.rgb_image_filepath)
                 estimated_locations.append(estimated_location)
             all_estimated_locations.append(estimated_locations)
         return all_estimated_locations

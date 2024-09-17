@@ -6,12 +6,9 @@ import json
 class BBoxMatching(ABC):
     @abstractmethod
     def matching(self, 
-                 bbox2d_list: List[Location], 
-                 bbox3d_list: List[Bbox3d], 
+                 location_estimates: List[Location], 
                  bbox2d_labels: List[Location], 
-                 bbox3d_labels: List[Bbox3d], 
-                 tracking_ids: List[int],
-                 coda_tracking_ids: List[int]) -> Dict[int, int]:
+                 bbox3d_labels: List[Bbox3d]) -> Dict[int, int]:
         pass
     
 class ManualBBoxMatching(BBoxMatching):
@@ -22,10 +19,7 @@ class ManualBBoxMatching(BBoxMatching):
             self.matching_dict = json.load(f)
 
     def matching(self, 
-                 bbox2d_list: List[Location], 
-                 bbox3d_list: List[Bbox3d], 
+                 location_estimates: List[Location], 
                  bbox2d_labels: List[Location], 
-                 bbox3d_labels: List[Bbox3d], 
-                 tracking_ids: List[int],
-                 coda_tracking_ids: List[int]) -> Dict[int, int]:
+                 bbox3d_labels: List[Bbox3d]) -> Dict[int, int]:
         return self.matching_dict

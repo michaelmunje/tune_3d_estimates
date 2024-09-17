@@ -50,6 +50,6 @@ docker run -it --rm \
     -v="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
     -u root \
     -v "$HOST_WORKSPACE_PATH:$CONTAINER_WORKSPACE_PATH" \
-    $IMAGE_NAME /bin/bash -c "cd coda-devkit && python scripts/evaluate_object_localization.py --config $CONFIG_FILEPATH"
+    $IMAGE_NAME /bin/bash -c "python evaluate_object_localization.py --config $CONFIG_FILEPATH"
     # --env="QT_X11_NO_MITSHM=1" \
     # --env="LIBGL_ALWAYS_INDIRECT=1" \
