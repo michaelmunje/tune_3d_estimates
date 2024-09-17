@@ -8,17 +8,18 @@ import sys
 import argparse
 from typing import List, Tuple, Dict
 
-import bbox_estimation
+import bbox_and_bev_estimation
+from bbox_and_bev_estimation import LartBBoxAndBevEstimation
 import bbox_matching 
 from metric_depth import get_depth_estimate, get_3d_points
-from utils import Sample, Bbox2d, Bbox3d, compute_2d_iou, compute_centroid_error
+from utils import Sample, Location, Bbox3d, compute_2d_iou, compute_centroid_error
 import open3d as o3d
 
 sys.path.append(os.getcwd())
 from utils import get_camera_matrix
 
 class ObjectLocalizationEvaluator:
-    def __init__(self, config_filepath, model):
+    def __init__(self, config_filepath, debug=False):
         # Load the configuration file
         if config_filepath:
             with open(config_filepath, "r") as file:
@@ -28,10 +29,15 @@ class ObjectLocalizationEvaluator:
         self.use_gaussian_blur = config["use_gaussian_blur"]
         self.use_undistort_correction = config["use_undistort_correction"]
         self.metric_3d_model = config["metric_3d_model"]
-        bbox_estimation_method = getattr(bbox_estimation, config["bbox_estimation"])
-        self.bbox_estimation = bbox_estimation_method(**config["bbox_estimation_config"])
+        bbox_and_bev_estimation_method = getattr(bbox_and_bev_estimation, config["bbox_and_bev_estimation"])
+        self.bbox_and_bev_estimation = bbox_and_bev_estimation_method(config)
         bbox_matching_method = getattr(bbox_matching, config["bbox_matching"])
         self.bbox_matching = bbox_matching_method(**config["bbox_matching_config"])
+        
+        self.sample_save_folder = config["sample_save_folder"]
+        self.camera_matrix_np = self.bbox_and_bev_estimation.camera_matrix_np
+        self.distortion_coeffs_np = self.bbox_and_bev_estimation.distortion_coeffs_np
+        self.extrinsics_np = self.bbox_and_bev_estimation.extrinsics_np
         
         self.grid_x_min, self.grid_x_max = config["x_min"], config["x_max"]
         self.grid_y_min, self.grid_y_max = config["y_min"], config["y_max"]
@@ -46,116 +52,27 @@ class ObjectLocalizationEvaluator:
         ]
         self.traj_idx = config["traj_idx"]
         
-        self.input_width = config["input_width"]
-        self.input_height = config["input_height"]
-
-        self.distortion_coeffs = np.array(config["distortion_coeffs"])
-        self.translation_vector = torch.tensor(config["translation_vector"])
-
-        self.intrinsics = config["intrinsics"]
-        self.camera_matrix = get_camera_matrix(self.intrinsics)
-        self.inv_camera_matrix = torch.inverse(self.camera_matrix)
-        self.inv_camera_matrix = (
-            self.inv_camera_matrix.cuda()
-            if torch.cuda.is_available()
-            else self.inv_camera_matrix
-        )
-
-        # Assuming no rotation, identity rotation matrix (3x3)
-        rotation_matrix = torch.eye(3)
-
-        # Combine rotation and translation into a 4x4 extrinsic matrix
-        extrinsics = torch.eye(4)
-        extrinsics[:3, :3] = rotation_matrix
-        extrinsics[:3, 3] = self.translation_vector
-        self.extrinsics = extrinsics.cuda() if torch.cuda.is_available() else extrinsics
-
-        if "vit" in self.metric_3d_model:
-            self.metric_3d_input_size = (616, 1064)  # for vit model
-        else:
-            self.metric_3d_input_size = (544, 1216)  # for convnext model
-
-        h, w = self.input_height, self.input_width
-        self.input_size = (h, w)
-        scale = min(
-            self.metric_3d_input_size[0] / self.input_height,
-            self.metric_3d_input_size[1] / self.input_width,
-        )
-        self.scaled_intrinsics = [
-            self.intrinsics[0] * scale,
-            self.intrinsics[1] * scale,
-            self.intrinsics[2] * scale,
-            self.intrinsics[3] * scale,
-        ]
-        self.padding = [123.675, 116.28, 103.53]
-        self.pad_h = self.metric_3d_input_size[0] - h
-        self.pad_w = self.metric_3d_input_size[1] - w
-        self.pad_h = max(self.pad_h, 0)
-        self.pad_w = max(self.pad_w, 0)
-        self.pad_h_half = self.pad_h // 2
-        self.pad_w_half = self.pad_w // 2
-        
-        # make sure our pad info make sure for the input size...
-        # pad_h_half, pad_h - pad_h_half, pad_w_half, pad_w - pad_w_half
-        assert self.pad_h_half >= 0, 'Pad height half must be greater than or equal to 0.'
-        assert self.pad_h - self.pad_h_half >= 0, 'Pad height must be greater than or equal to pad height half.'
-        assert self.pad_w_half >= 0, 'Pad width half must be greater than or equal to 0.'
-        assert self.pad_w - self.pad_w_half >= 0, 'Pad width must be greater than or equal to pad width half.'
-        
-        self.pad_info = [
-            self.pad_h_half,
-            self.pad_h - self.pad_h_half,
-            self.pad_w_half,
-            self.pad_w - self.pad_w_half,
-        ]
-
-        self.mean = torch.tensor([123.675, 116.28, 103.53]).float()[:, None, None]
-        self.std = torch.tensor([58.395, 57.12, 57.375]).float()[:, None, None]
-        
-        self.sample_save_folder = 'data/selected_samples'
-        
-        self.camera_matrix_np = np.array(self.camera_matrix).astype(np.float64)
-        self.distortion_coeffs_np = np.array(self.distortion_coeffs).astype(np.float64)
-        self.extrinsics_np = self.extrinsics.cpu().numpy().astype(np.float64)
-        
         assert type(self.traj_idx) == int, 'Trajectory index must be an integer. Otherwise, you\'ll need to modify this dict below.' 
         self.lart_tracking_id_to_coda_id = {}
         with open('corresponding_trackings.json', 'r') as file:
             data = json.load(file)
             self.lart_tracking_id_to_coda_id = data
 
-        # Load the metric depth estimation model
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = torch.hub.load(
-            "yvanyin/metric3d",
-            self.metric_3d_model,
-            pretrain=True,
-            map_location=torch.device("cpu"),
-        )
-        self.model.eval()
-        self.model = self.model.to(self.device)
-        self.model = torch.compile(self.model)
-
-    def compute_bbox_errors(self, bbox2d_list: List[Bbox2d], 
-                            bbox3d_list: List[Bbox3d], 
-                            bbox2d_labels: List[Bbox2d],
-                            bbox3d_labels: List[Bbox3d],
-                            matched_ids: Dict[int, int]) -> Tuple[List[float], List[float]]:
+    def compute_bbox_errors(self, bbox2d_list: List[Location], 
+                            bbox2d_labels: List[Location],
+                            matched_ids: Dict[int, int]) -> List[float]:
         """
         Compute the errors between estimated and ground truth bounding boxes.
 
         Args:
-            bbox2d_list (List[Bbox2d]): List of estimated 2D bounding boxes.
-            bbox3d_list (List[Bbox3d]): List of estimated 3D bounding boxes.
-            bbox2d_labels (List[Bbox2d]): List of ground truth 2D bounding boxes.
-            bbox3d_labels (List[Bbox3d]): List of ground truth 3D bounding boxes.
+            bbox2d_list (List[Location]): List of estimated 2D bounding boxes.
+            bbox2d_labels (List[Location]): List of ground truth 2D bounding boxes.
             matched_ids (Dict[int, int]): Dictionary mapping estimated bbox ids to ground truth ids.
 
         Returns:
             Tuple[List[float], List[float]]: Lists of 2D and 3D errors for matched bounding boxes.
         """
         errors_2d = []
-        errors_3d = []
 
         for estimated_id, label_id in matched_ids.items():
             # Compute 2D IoU
@@ -164,111 +81,102 @@ class ObjectLocalizationEvaluator:
             iou_2d = compute_2d_iou(bbox2d_estimated, bbox2d_label)
             errors_2d.append(1 - iou_2d)  # Error is 1 - IoU
 
-            # Compute 3D centroid 
-            bbox3d_estimated = bbox3d_list[estimated_id]
-            bbox3d_label = bbox3d_labels[label_id]
-            centroid_error_3d = compute_centroid_error(bbox3d_estimated, bbox3d_label)
-            errors_3d.append(centroid_error_3d)
-
-        return errors_2d, errors_3d
+        return errors_2d
     
-    def extract_labels(self):
-        # TODO: Implement extract_labels method
-        # This method should extract 2D and 3D bounding boxes, and tracking IDs from the samples
-        # It should return:
-        # - bbox2d_labels: List of ground truth 2D bounding boxes
-        # - bbox3d_labels: List of ground truth 3D bounding boxes
-        # - tracking_ids: List of tracking IDs for the ground truth objects
-        pass
+    def extract_labels(self, samples: List[Sample]) -> Tuple[List[Bbox3d], List[Bbox3d], List[Bbox3d], List[int]]:
+        bbox3d_labels = []
+        bbox2d_labels = []
+        bev_labels = []
+        tracking_ids = []
+        
+        for sample in samples:
+            objects = sample.objects
+            for obj in objects:
+                bbox3d_labels.append(obj.bbox3d)
+                bbox2d_labels.append(obj.bbox3d.get_bbox2d(self.camera_matrix_np, self.distortion_coeffs_np, self.extrinsics_np))
+                bev_labels.append(obj.bbox3d.get_bev_location())
+                tracking_ids.append(obj.id)
+        
+        return bbox3d_labels, bbox2d_labels, bev_labels, tracking_ids
 
     def evaluate(self):
         frame_indices = self.get_viable_samples()
         samples = self.load_samples(frame_indices)
 
-        # estimate 2D and 3D bounding boxes 
-        bbox2d_list, bbox3d_list = self.bbox_estimation.estimate(samples)
-
         # get ground truth 2D, 3D bounding boxes, and tracking ids from data
-        bbox2d_labels, bbox3d_labels, tracking_ids = self.extract_labels(samples)
+        bbox3d_labels, bbox2d_labels, bev_labels, tracking_ids = self.extract_labels(samples)
+
+        # estimate 2D bbox estimates and bev estimates
+        location_estimates = self.bbox_and_bev_estimation.estimate(samples)
 
         # Match estimated and ground truth bounding boxes
         # matched_ids is a dictionary where:
         # - keys are the estimated bounding box ids (indices in the estimated bbox list)
         # - values are the corresponding ground truth ids
-        matched_ids = self.bbox_matching.matching(bbox2d_list, bbox3d_list, bbox2d_labels, bbox3d_labels, tracking_ids)
+        matched_ids = self.bbox_matching.matching(location_estimates, bbox2d_labels, bbox3d_labels)
+        
+        bev_labels_with_keys = {}
+        for tracking_id, bev_label in zip(tracking_ids, bev_labels):
+            bev_labels_with_keys[tracking_id] = bev_label
+            
+        bev_estimates_with_keys = {}
+        for loc_estimate in location_estimates:
+            tracking_id = loc_estimate.tracking_id
+            bev_estimates_with_keys[tracking_id] = np.array([loc_estimate.cX, loc_estimate.cY])
 
-        # Compute errors between estimaed and ground truth bounding boxes
-        errors_2d, errors_3d = self.compute_bbox_errors(bbox2d_list, bbox3d_list, bbox2d_labels, bbox3d_labels, matched_ids)
+        # Compute errors between estimated and ground truth bounding boxes
+        # matched_ids is a dictionary where:
+        # - keys are the estimated bounding box ids (indices in the estimated bbox list)
+        # - values are the corresponding ground truth ids
+        
+        # errors_2d = self.compute_bbox_errors(bbox2d_list, bbox2d_labels, matched_ids)
+        errors_bev = self.compute_bev_errors(bev_estimates_with_keys, bev_labels_with_keys, matched_ids)
 
         # Process and analyze the errors
-        mean_error_2d = np.mean(errors_2d)
-        mean_error_3d = np.mean(errors_3d)
+        mean_error_bev = np.mean(errors_bev)
+        # mean_error_3d = np.mean(errors_3d)
         
-        return mean_error_2d, mean_error_3d
+        # let's also save a plot of the bevs
+        self.save_bev_visualization(bev_estimates_with_keys, bev_labels_with_keys, matched_ids, fp='data/bev_visualization.png')
+        
+        return mean_error_bev
+    
+    def save_bev_visualization(self, bev_estimates, bev_labels, matched_ids, fp):
+        # let's also plot bevs
+        self.visualize_bevs(bev_estimates, bev_labels, matched_ids)
+        plt.savefig(fp)
+        
+    def visualize_bevs(self, bev_estimates, bev_labels, matched_ids):
+        plt.figure()
+        plt.scatter(bev_estimates.values(), bev_labels.values(), c='blue', label='Estimated BEV')
+        plt.scatter(bev_labels.values(), bev_labels.values(), c='red', label='Ground Truth BEV')
+        plt.xlabel('Estimated BEV')
+        plt.ylabel('Ground Truth BEV')
+        
+        plt.xlim(self.grid_x_min, self.grid_x_max)
+        plt.ylim(self.grid_y_min, self.grid_y_max)
+        plt.axis('equal')
+        plt.grid(True)
+        
+        plt.title('BEV Estimates and Ground Truth')
+        plt.legend()
+        plt.show()
+    
+    def compute_bev_errors(self, bev_estimates, bev_labels, matched_ids):
+        errors = []
+        for estimated_id, label_id in matched_ids.items():
+            bev_estimate = bev_estimates[estimated_id]
+            bev_label = bev_labels[label_id]
+            error = np.linalg.norm(bev_estimate - bev_label)
+            errors.append(error)
+        return errors
     
     def visualize_point_cloud(self):
         frame_indices = self.get_viable_samples()
         samples = self.load_samples(frame_indices)
         
         for sample in samples:
-            # let's get the 3d point cloud and visualize it :)
-            frame = sample.get_img()
-            depth = get_depth_estimate(frame, self.scaled_intrinsics, self.model, self.mean, self.std,
-                                        self.pad_info, self.input_size, self.padding, self.pad_h, self.pad_w, self.pad_h_half, self.pad_w_half)
-            points_3d = get_3d_points(depth, self.inv_camera_matrix, self.extrinsics)
-
-            # Create a PointCloud object
-            point_cloud = o3d.geometry.PointCloud()
-
-            # swap the channels
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            if frame.ndim == 3:  # H x W x 3
-                frame = frame.reshape(-1, 3)
-
-            # Normalize frame values if necessary (assuming frame has values 0-255)
-            frame_normalized = frame / 255.0
-
-            # Ensure the number of colors matches the number of points
-            assert (
-                points_3d.shape[0] == frame_normalized.shape[0]
-            ), "Points and colors must match in size."
-
-            # Assign points to the point cloud
-            point_cloud.points = o3d.utility.Vector3dVector(
-                points_3d.cpu().numpy()
-            )
-            point_cloud.colors = o3d.utility.Vector3dVector(
-                frame_normalized
-            )
-
-            axis = o3d.geometry.TriangleMesh.create_coordinate_frame(
-                size=0.3, origin=[0, 0, 0]
-            )
-
-            # occupancy grid reference points
-            reference_pts = [
-                o3d.geometry.TriangleMesh.create_coordinate_frame(
-                    size=1, origin=[self.grid_x_min, self.grid_y_min, 0]
-                ),
-                o3d.geometry.TriangleMesh.create_coordinate_frame(
-                    size=1, origin=[self.grid_x_min, self.grid_y_max, 0]
-                ),
-                o3d.geometry.TriangleMesh.create_coordinate_frame(
-                    size=1, origin=[self.grid_x_max, self.grid_y_min, 0]
-                ),
-                o3d.geometry.TriangleMesh.create_coordinate_frame(
-                    size=1, origin=[self.grid_x_max, self.grid_y_max, 0]
-                ),
-            ]
-
-            # To visualize the point cloud
-            o3d.visualization.draw_geometries(
-                [point_cloud, axis] + reference_pts
-            )
-        
-        # save selected samples
-        self.save_selected_samples(samples)
+            self.bbox_and_bev_estimation.visualize_point_cloud(sample)
     
     def get_viable_samples(self) -> List[str]:
         # need to make sure they have both a .png and .json file
@@ -293,15 +201,12 @@ class ObjectLocalizationEvaluator:
                 data = json.load(file)
                 objects = data['3dbbox']
                 
-            # filter samples for debug :)
             objects = [obj for obj in objects if obj['classId'] == 'Pedestrian']
-            # objects = [obj for obj in objects if obj['instanceId'] == 'Pedestrian:241']
-            
-            sample = Sample(rgb_image_filepath=image_path, objects=objects)
+            sample = Sample(rgb_image_filepath=image_path, objects=objects, lart_folder=self.lart_folder)
             samples.append(sample)
             
         return samples
-
+    
     # this will randomly select samples from the dataset
     # and save them to a folder
     def save_selected_samples(self, samples: List[Sample], n_samples: int = 35):
@@ -326,6 +231,8 @@ class ObjectLocalizationEvaluator:
 if __name__ == '__main__':
     args = argparse.ArgumentParser(description='Evaluate object localization.')
     args.add_argument('--config', type=str, help='Path to configuration file.')
+    args.add_argument('--debug', action='store_true', help='Enable debug mode.')
     config_filepath = args.parse_args().config
-    evaluator = ObjectLocalizationEvaluator(config_filepath)
+    debug = args.parse_args().debug
+    evaluator = ObjectLocalizationEvaluator(config_filepath, debug)
     evaluator.evaluate()

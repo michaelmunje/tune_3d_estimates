@@ -2,7 +2,7 @@ import cv2
 import torch
 import numpy as np
 from typing import List, Tuple
-from helpers.geometry import projectPointsWithDist, get_pointsinfov_mask, get_3dbbox_corners
+from geometry import projectPointsWithDist, get_pointsinfov_mask, get_3dbbox_corners
 
 def get_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
     fx, fy, cx, cy = intrinsics
@@ -15,16 +15,23 @@ def get_inverse_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
     return inv_camera_matrix
 
 # save 2d bounding box and also 3d location
-class Bbox2d:
+class Location:
     def __init__(self, x: float, y: float, w: float, h: float,
-                 cX: float, cY: float, cZ: float):
+                 cX: float, cY: float, cZ: float,
+                 tracking_id: int):
+        
+        # 2b bounding box params
         self.x = x
         self.y = y
         self.w = w
         self.h = h
+        
+        # 3d location params
         self.cX = cX
         self.cY = cY
         self.cZ = cZ
+
+        self.tracking_id = tracking_id
 
 class Bbox3d:
     def __init__(self, cX: float, cY: float, cZ: float, 
@@ -39,7 +46,7 @@ class Bbox3d:
         self.r = r
         self.p = p
         self.y = y
-    
+
     def to_dict(self):
         return {
             'cX': self.cX,
@@ -52,6 +59,9 @@ class Bbox3d:
             'p': self.p,
             'y': self.y
         }
+
+    def get_bev_location(self):
+        return (self.cX, self.cY)
         
     # requires projecting the 3D bounding box to 2D
     def get_bbox2d(self, instrinsics_mat: np.array, distortion_coeffs: np.array, extrinsics: np.array):
@@ -100,7 +110,7 @@ class Bbox3d:
         image_points = image_points[valid_points_mask]
         
         if len(image_points) == 0:
-            return Bbox2d(x=-1, y=-1, w=0, h=0,
+            return Location(x=-1, y=-1, w=0, h=0,
                   cX=self.cX, cY=self.cY, cZ=self.cZ)
         
         y_max = np.max(image_points[:, 0]).astype(int)
@@ -111,10 +121,9 @@ class Bbox3d:
         x, y = x_min, y_min
         w, h = x_max - x_min, y_max - y_min
         
-        return Bbox2d(x=x, y=y, w=w, h=h,
-                      cX=self.cX, cY=self.cY, cZ=self.cZ)
+        return Location(x=x, y=y, w=w, h=h, cX=self.cX, cY=self.cY, cZ=self.cZ)
     
-def compute_2d_iou(bbox1: Bbox2d, bbox2: Bbox2d) -> float:
+def compute_2d_iou(bbox1: Location, bbox2: Location) -> float:
     """Compute the Intersection over Union (IoU) for 2D bounding boxes."""
     x1 = max(bbox1.x, bbox2.x)
     y1 = max(bbox1.y, bbox2.y)
@@ -151,18 +160,29 @@ class Entity:
             data['l'],
             data['r'],
             data['p'],
-            data['y']
+            data['y'],
         )
 
 class Sample:
-    def __init__(self, rgb_image_filepath: str, objects: dict):
+    def __init__(self, rgb_image_filepath: str, objects: dict, lart_folder: str):
         self.rgb_image_filepath: str = rgb_image_filepath
         self.objects: List[Entity] = [Entity(obj) for obj in objects]
         # also create mapping from instanceId to Entity
         self.instance_id_to_entity = {obj.id: obj for obj in self.objects}
+        self.lart_folder = lart_folder
 
     def get_img(self):
         return cv2.imread(self.rgb_image_filepath)
+    
+    def get_lart_data(self):
+        rgb_image_filename = self.rgb_image_filepath.split('/')[-1]
+        lart_filename = rgb_image_filename.replace('.jpg', '.pkl')
+        lart_filepath = os.path.join(self.lart_folder, lart_filename)
+        with open(lart_filepath, 'rb') as f:
+            lart_data = pickle.load(f)
+        # lart data is a dictionary
+        # key is the tracking id
+        return lart_data
     
 class Estimate:
     def __init__(self, x, y, z, lart_tracking_id, lart_bounding_box):

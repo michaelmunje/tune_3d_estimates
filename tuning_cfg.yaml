@@ -10,6 +10,9 @@ use_gamma_correction: false
 use_gaussian_blur: true
 use_undistort_correction: true
 debug_mode: false
+random_seed: 42
+
+lart_folder: /home/mike/projects/tune3d/coda-devkit/data/eval_lart_data
 
 intrinsics:
   - 730.271578753826
@@ -43,3 +46,9 @@ input_height: 1024
 
 # monocular depth estimation stuff
 metric_3d_model: metric3d_vit_small
+lart_folder: /home/mike/projects/tune3d/coda-devkit/data/eval_lart_data
+
+bbox_estimation: LartBBoxEstimation
+bbox_matching: ManualBBoxMatching
+bbox_matching_config:
+  matching_filepath: /home/mike/projects/tune3d/coda-devkit/corresponding_trackings.json
