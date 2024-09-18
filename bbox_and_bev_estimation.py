@@ -138,7 +138,7 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model: torch.nn.Module = torch.hub.load(
             "yvanyin/metric3d",
-            metric_3d_model,
+            self.metric_3d_model,
             pretrain=True,
             map_location=torch.device("cpu"),
         )
@@ -157,8 +157,9 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
             points_3d = get_3d_points(depth, self.inv_camera_matrix, self.extrinsics)
             
             lart_data = sample.get_lart_data()
-            for i in range(len(lart_data['bbox2d'])):
-                estimate = lart_data[i]
+            for tracking_id in lart_data:
+                estimate = lart_data[tracking_id]
+                
                 bbox2d = estimate['bbox']
                 
                 x, y, w, h = bbox2d
@@ -166,9 +167,10 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
                 if w == 0 or h == 0:
                     continue
                 
-                tracking_id = lart_data['tracking_id'][i]
-                
-                avg_3d_location = get_3d_estimation_in_bbox(sample.get_img(), points_3d, bbox2d)
+                avg_3d_location = get_3d_estimation_in_bbox(frame=sample.get_img(), 
+                                                            point_cloud=points_3d, 
+                                                            bbox=bbox2d)
+                avg_3d_location = avg_3d_location.cpu().numpy()
                 estimated_location = Location(x, y, w, h, avg_3d_location[0], avg_3d_location[1], avg_3d_location[2], tracking_id, sample.rgb_image_filepath)
                 estimated_locations.append(estimated_location)
             all_estimated_locations.append(estimated_locations)

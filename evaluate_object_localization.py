@@ -8,6 +8,10 @@ import sys
 import argparse
 from typing import List, Tuple, Dict
 
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.lines as mlines
+
 import bbox_and_bev_estimation
 import bbox_matching 
 from utils import Sample, Location, Bbox3d, compute_2d_iou, compute_centroid_error
@@ -157,8 +161,11 @@ class ObjectLocalizationEvaluator:
         
         return mean_error_bev
     
-    def visualize_2d_bbox_on_image(self, image, x, y, w, h):
-        cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
+    def visualize_2d_bbox_on_image(self, image, x, y, w, h, color):
+        color = tuple(int(c * 255) for c in color)
+        # change to bgr
+        color = color[::-1]
+        cv2.rectangle(image, (x, y), (x+w, y+h), color, 6)
     
     def save_bev_visualization(self, loc_estimates, loc_labels, matched_ids, fp, 
                                include_2d_bbox_estimate_visualization: bool = True,
@@ -167,6 +174,27 @@ class ObjectLocalizationEvaluator:
         sample_filepath = first_loc_estimate.sample_filepath
         # load the image
         image = cv2.imread(sample_filepath)
+                
+        # Use a predefined color palette from matplotlib (e.g., 'tab10', 'Set1', 'Set2')
+        palette = plt.get_cmap('tab10').colors  # 'tab10' has 10 distinct colors
+        num_colors = len(palette)
+
+        # Dictionary to store colors for each tracking ID
+        tracking_id_colors = {}
+
+        corresponding_estimates_and_labels = []
+        for tracking_id, loc_estimate in loc_estimates.items():
+            if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
+                bev_estimate = loc_estimate.get_bev_location()
+                bev_label = loc_labels[matched_ids[tracking_id]].get_bev_location()
+                
+                # Assign a color to each tracking ID if not already assigned
+                if tracking_id not in tracking_id_colors:
+                    # Use colors from the palette by cycling through them
+                    tracking_id_colors[tracking_id] = palette[len(tracking_id_colors) % num_colors]
+            
+                color = tracking_id_colors[tracking_id]
+                corresponding_estimates_and_labels.append((bev_estimate, bev_label, color))
         
         if include_2d_bbox_estimate_visualization:
             # visualize the 2d bbox on the image
@@ -175,7 +203,8 @@ class ObjectLocalizationEvaluator:
                     x, y, w, h = loc_estimate.x, loc_estimate.y, loc_estimate.w, loc_estimate.h
                     x, y = int(x), int(y)
                     w, h = int(w), int(h) 
-                    self.visualize_2d_bbox_on_image(image, x, y, w, h)
+                    color = tracking_id_colors[tracking_id]
+                    self.visualize_2d_bbox_on_image(image, x, y, w, h, color)
         
         if include_3d_bbox_label_visualization:
             raise NotImplementedError
@@ -184,7 +213,7 @@ class ObjectLocalizationEvaluator:
             #     loc_estimate.visualize_3d_bbox()
             
         # let's also plot bevs
-        self.visualize_bev(loc_estimates, loc_labels, matched_ids)
+        self.visualize_bev(corresponding_estimates_and_labels)
         
         # save side by side with original image and current plot (use temporary file)
         temp_file = f'{fp}_temp.png'
@@ -202,29 +231,28 @@ class ObjectLocalizationEvaluator:
         
         cv2.imwrite(fp, img)
         
-    def visualize_bev(self, loc_estimates, loc_labels, matched_ids):
+    def visualize_bev(self, corresponding_estimates_and_labels_and_colors):
         # each estimate (and its corresponding label) should have a different color
-        
-        corresponding_estimates_and_labels = []
-        for tracking_id, loc_estimate in loc_estimates.items():
-            if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
-                bev_estimate = loc_estimate.get_bev_location()
-                bev_label = loc_labels[matched_ids[tracking_id]].get_bev_location()
-                corresponding_estimates_and_labels.append((bev_estimate, bev_label))
-        
+    
         # now let's plot them
         fig, ax = plt.subplots()
-        for bev_estimate, bev_label in corresponding_estimates_and_labels:
-            ax.plot(bev_estimate[1], bev_estimate[0], 'bo', label='Estimated')
-            ax.plot(bev_label[1], bev_label[0], 'ro', label='Ground Truth')
+        for bev_estimate, bev_label, color in corresponding_estimates_and_labels_and_colors:
+            ax.plot(bev_estimate[1], bev_estimate[0], '*', color=color, markersize=10)
+            ax.plot(bev_label[1], bev_label[0], 'o', color=color, markersize=8)
             
         # expected grid limits
         ax.set_xlim(self.grid_y_min, self.grid_y_max)
         ax.set_ylim(self.grid_x_min, self.grid_x_max)
         ax.set_xlim(ax.get_xlim()[::-1])
         ax.grid(True)
-        ax.legend()
-        ax.set_title('Bev Visualization')
+        
+        # Custom legend for markers
+        estimated_legend = mlines.Line2D([], [], color='black', marker='*', linestyle='None', label='Estimated', markersize=10)
+        pseudo_gt_legend = mlines.Line2D([], [], color='black', marker='o', linestyle='None', label='Pseudo-Ground Truth', markersize=8)
+        ax.legend(handles=[estimated_legend, pseudo_gt_legend])
+
+        
+        ax.set_title(f'BEV Visualization: {self.bbox_and_bev_estimation.__class__.__name__}')
         ax.set_ylabel('X (forward)')
         ax.set_xlabel('Y (left)')
         ax.set_aspect('equal', 'box')

@@ -155,7 +155,8 @@ def get_3d_estimation_in_bbox(frame, point_cloud, bbox, inner_bbox=True):
     # need some way to select the points that are in a bbox
     bbox_mask = np.zeros((frame.shape[0], frame.shape[1]), dtype=np.uint8)
     # dummy example
-    x, y, w, h = bbox.x, bbox.y, bbox.w, bbox.h
+    x, y, w, h = bbox
+    x, y, w, h = int(x), int(y), int(w), int(h)
     if inner_bbox: # then get inside region
         h = h // 2
         w = w // 2
