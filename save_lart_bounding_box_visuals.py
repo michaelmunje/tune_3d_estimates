@@ -16,42 +16,73 @@ from PIL import Image
 import pickle
 import tqdm
 
+
+def find_closest_image(image_filepath: str) -> str:
+    sample_idx = image_filepath.split('_')[-1]
+    # remove the .png
+    sample_idx = sample_idx.split('.')[0]
+    sample_idx = int(sample_idx)
+    
+    # Find the closest image that exists
+    next_idx = sample_idx - 1
+    next_fp = '_'.join(image_filepath.split('_')[:-1]) + '_' + str(next_idx) + '.png'
+    while not os.path.exists(next_fp):
+        next_idx -= 1
+        next_fp = '_'.join(image_filepath.split('_')[:-1]) + '_' + str(next_idx) + '.png'
+    return next_fp
+    
 def save_all_lart_bounding_boxes_for_sample(image_filepath: str, lart_data_path: str, output_dir: str):
     # Load the LART data
     with open(lart_data_path, 'rb') as f:
         lart_data = pickle.load(f)
         
+        
     sample_id = os.path.basename(lart_data_path).split('.')[0]
         
+    if not os.path.exists(image_filepath):
+        image_filepath = find_closest_image(image_filepath)
+        
+    assert os.path.exists(image_filepath), f"Image file {image_filepath} does not exist"
+
     for tracking_id in lart_data:
         bbox = lart_data[tracking_id]['bbox']
         x, y, w, h = bbox
         x, y, w, h = int(x), int(y), int(w), int(h)
         # Load the image
-        assert os.path.exists(image_filepath), f"Image file {image_filepath} does not exist"
+        # if it doesn't exist, use the closest image
+
         image = cv2.imread(image_filepath)
         # Draw the bounding box
         cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
         # Save the image
-        output_filepath = os.path.join(output_dir, f"{sample_id}_{tracking_id}.png")
+        track_output_dir = os.path.join(output_dir, tracking_id)
+        if not os.path.exists(track_output_dir):
+            os.makedirs(track_output_dir)
+        output_filepath = os.path.join(track_output_dir, f"{sample_id}.png")
         cv2.imwrite(output_filepath, image)
-        
+
 def save_all_visuals(lart_data_dir: str, images_dir: str, output_dir: str):
     # only save first 5
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
     def is_desired_lart_file(filename: str) -> bool:
-        if filename.endswith('_907.pkl'):
-            return True
-        elif filename.endswith('_997.pkl'):
-            return True
-        elif filename.endswith('_1054.pkl'):
-            return True
-        elif filename.endswith('_1157.pkl'):
-            return True
-        elif filename.endswith('_1174.pkl'):
-            return True
+        all_desired_idx = [str(900 + idx) for idx in range(0, 75, 7)]
+        for idx in all_desired_idx:
+            if str(filename).endswith(idx + '.pkl'):
+                return True
+        # repeat with 1200
+        all_desired_idx = [str(1000 + idx) for idx in range(0, 75, 7)]
+        for idx in all_desired_idx:
+            if str(filename).endswith(idx + '.pkl'):
+                return True
+            
+        # repeat with 1700
+        all_desired_idx = [str(1100 + idx) for idx in range(0, 75, 7)]
+        for idx in all_desired_idx:
+            if str(filename).endswith(idx + '.pkl'):
+                return True
+
         return False
 
     lart_data_paths = os.listdir(lart_data_dir)

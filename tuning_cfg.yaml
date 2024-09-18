@@ -47,7 +47,11 @@ metric_3d_model: metric3d_vit_small
 lart_folder: coda-devkit/data/eval_lart_data
 sample_save_folder: estimations_sample_save
 
-bbox_and_bev_estimation: LartBBoxAndBevEstimation
+bbox_and_bev_estimation: MDEBBoxAndBevEstimation
 bbox_matching: ManualBBoxMatching
 bbox_matching_config:
   matching_filepath: coda-devkit/corresponding_trackings.json
+
+frame_interval_lengths: 75
+frame_interval_sample_stride: 7
+frame_intervals_start_indices: [900, 1000, 1100]

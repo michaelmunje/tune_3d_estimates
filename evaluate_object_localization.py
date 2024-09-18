@@ -20,6 +20,7 @@ from matplotlib import pyplot as plt
 
 sys.path.append(os.getcwd())
 from utils import get_camera_matrix
+import math
 
 class ObjectLocalizationEvaluator:
     def __init__(self, config_filepath, debug=False):
@@ -56,7 +57,99 @@ class ObjectLocalizationEvaluator:
         ]
         self.traj_idx = config["traj_idx"]
         
+        self.frame_intervals_start_indices = config["frame_intervals_start_indices"]
+        self.frame_interval_lengths = config["frame_interval_lengths"]
+        self.frame_interval_sample_stride = config["frame_interval_sample_stride"]
+        self.frame_sequences = []
+        
+        for start_idx in self.frame_intervals_start_indices:
+            self.frame_sequences.append(list(range(start_idx, start_idx + self.frame_interval_lengths, self.frame_interval_sample_stride)))
+        
         assert type(self.traj_idx) == int, 'Trajectory index must be an integer. Otherwise, you\'ll need to modify this dict below.' 
+        
+        # get corresponding 
+        # row idx is frame/sample idx
+        # cols: timestamp x y z qw qx qy qz
+        # x y z is translation
+        # qw qx qy qz is quaternion
+        # example of row:
+        # 1675697952.451304  -0.000504   0.000465   0.000038   0.998855   0.000319   0.027345  -0.039263
+        self.poses_filepath = f'coda-devkit/data/poses/dense_global/{self.traj_idx}.txt'
+        self.poses = np.loadtxt(self.poses_filepath)
+        # let's map idx to all these things!
+        self.frame_idx_to_pose = {
+            idx: {'timestep': pose[0], 
+                  'x': pose[1], 'y': pose[2], 'z': pose[3], 
+                  'qw': pose[4], 'qx': pose[5], 'qy': pose[6], 'qz': pose[7]} 
+            for idx, pose in enumerate(self.poses)
+        }
+        
+    #  transform bev coordinates w.r.t. current pose to w.r.t initial pose
+    def get_bev_coords_wrt_initial_pose(self, bev_coords: np.array, current_pose_frame_idx: int, initial_pose_frame_idx: int):
+        # get the transformation matrix
+        current_pose = self.frame_idx_to_pose[current_pose_frame_idx]
+        initial_pose = self.frame_idx_to_pose[initial_pose_frame_idx]
+        
+        # reference code:
+
+        #     # transform coordinates from current frame to first frame
+        #     (curr_x, curr_y), current_yaw = odometry_data[timestep]
+        #     (initial_x, initial_y), initial_yaw = odometry_data[0]
+            
+        #     delta_yaw = (current_yaw - initial_yaw)
+            
+        #     delta_x = curr_x - initial_x
+        #     delta_y = curr_y - initial_y
+            
+        #     R = np.array([[np.cos(delta_yaw), -np.sin(delta_yaw)], 
+        #                   [np.sin(delta_yaw), np.cos(delta_yaw)]])
+            
+        #     R2 = np.array([[np.cos(initial_yaw), np.sin(initial_yaw)], 
+        #                   [-np.sin(initial_yaw), np.cos(initial_yaw)]])
+            
+        #     T = np.array([delta_x, delta_y])
+
+        #     coords = np.array(coords)
+        #     coords = R @ coords[:2] + (R2 @ T)
+        #     coords = [coords[0], coords[1], -joint_coords[1]]
+        
+        def quaternion_to_yaw(qw, qx, qy, qz):
+            # Yaw calculation from quaternion
+            yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            return yaw
+            
+        curr_x, curr_y, curr_z = current_pose['x'], current_pose['y'], current_pose['z']
+        curr_qw, curr_qx, curr_qy, curr_qz = current_pose['qw'], current_pose['qx'], current_pose['qy'], current_pose['qz']
+        curr_yaw = quaternion_to_yaw(curr_qw, curr_qx, curr_qy, curr_qz)
+        
+        initial_x, initial_y, initial_z = initial_pose['x'], initial_pose['y'], initial_pose['z']
+        initial_qw, initial_qx, initial_qy, initial_qz = initial_pose['qw'], initial_pose['qx'], initial_pose['qy'], initial_pose['qz']
+        initial_yaw = quaternion_to_yaw(initial_qw, initial_qx, initial_qy, initial_qz)
+        
+        delta_yaw = curr_yaw - initial_yaw
+        
+        delta_x = curr_x - initial_x
+        delta_y = curr_y - initial_y
+        
+        R = np.array([[np.cos(delta_yaw), -np.sin(delta_yaw)], 
+                      [np.sin(delta_yaw), np.cos(delta_yaw)]])
+        
+        R2 = np.array([[np.cos(initial_yaw), np.sin(initial_yaw)], 
+                      [-np.sin(initial_yaw), np.cos(initial_yaw)]])
+        
+        T = np.array([delta_x, delta_y])
+        
+        bev_coords = np.array(bev_coords)
+        bev_coords = R @ bev_coords[:2] + (R2 @ T)
+        bev_coords = [bev_coords[0], bev_coords[1], -bev_coords[1]]
+        
+        return bev_coords
+        
+    def frame_idx_to_img_fp(self, frame_idx: int) -> str:
+        return f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
+    
+    def frame_idx_to_json_fp(self, frame_idx: int) -> str:
+        return f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
 
     def compute_bbox_errors(self, bbox2d_list: List[Location], 
                             bbox2d_labels: List[Location],
@@ -100,8 +193,7 @@ class ObjectLocalizationEvaluator:
         return bbox3d_labels, bbox2d_labels, bev_labels, tracking_ids
 
     def evaluate(self):
-        frame_indices = self.get_viable_samples()
-        samples = self.load_samples(frame_indices)
+        samples_sequences = self.load_samples()
 
         # get ground truth 2D, 3D bounding boxes, and tracking ids from data
         bbox3d_labels, bbox2d_labels, bev_labels, tracking_ids = self.extract_labels(samples)
@@ -218,6 +310,7 @@ class ObjectLocalizationEvaluator:
         # save side by side with original image and current plot (use temporary file)
         temp_file = f'{fp}_temp.png'
         plt.savefig(temp_file)
+        plt.close()
         img = cv2.imread(temp_file)
         os.remove(temp_file)
         
@@ -250,7 +343,6 @@ class ObjectLocalizationEvaluator:
         estimated_legend = mlines.Line2D([], [], color='black', marker='*', linestyle='None', label='Estimated', markersize=10)
         pseudo_gt_legend = mlines.Line2D([], [], color='black', marker='o', linestyle='None', label='Pseudo-Ground Truth', markersize=8)
         ax.legend(handles=[estimated_legend, pseudo_gt_legend])
-
         
         ax.set_title(f'BEV Visualization: {self.bbox_and_bev_estimation.__class__.__name__}')
         ax.set_ylabel('X (forward)')
@@ -271,40 +363,31 @@ class ObjectLocalizationEvaluator:
         return errors
     
     def visualize_point_cloud(self):
-        frame_indices = self.get_viable_samples()
-        samples = self.load_samples(frame_indices)
+        samples = self.load_samples()
         
         for sample in samples:
             self.bbox_and_bev_estimation.visualize_point_cloud(sample)
     
-    def get_viable_samples(self) -> List[str]:
-        # need to make sure they have both a .png and .json file
-        viable_frame_indices = []
-        target_folder = f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}'
-        # iterate over imgs in folder that correspond to our expected filename
-        for filename in os.listdir(target_folder):
-            if filename.endswith('.png'):
-                frame_idx = filename.split('_')[-1].split('.')[0]
-                json_path = f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
-                if os.path.exists(json_path):
-                    viable_frame_indices.append(frame_idx)
-        return viable_frame_indices
+    def load_samples(self):
+        samples_sequences = []
+        for frame_indices in self.frame_sequences:
+            samples = []
+            for frame_idx in frame_indices:
+                image_path = self.frame_idx_to_img_fp(frame_idx)
+                json_path = self.frame_idx_to_json_fp(frame_idx)
+                
+                assert os.path.exists(image_path), f'Image path {image_path} does not exist'
+                assert os.path.exists(json_path), f'JSON path {json_path} does not exist'
 
-    def load_samples(self, frame_indices):
-        samples = []
-        for frame_idx in frame_indices:
-            image_path = f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
-            json_path = f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
-            
-            with open(json_path, 'r') as file:
-                data = json.load(file)
+                with open(json_path, 'r') as file:
+                    data = json.load(file)
                 objects = data['3dbbox']
                 
-            objects = [obj for obj in objects if obj['classId'] == 'Pedestrian']
-            sample = Sample(rgb_image_filepath=image_path, objects=objects, lart_folder=self.lart_folder)
-            samples.append(sample)
-            
-        return samples
+                objects = [obj for obj in objects if obj['classId'] == 'Pedestrian']
+                sample = Sample(rgb_image_filepath=image_path, objects=objects, lart_folder=self.lart_folder)
+                samples.append(sample)
+            samples_sequences.append(samples)
+        return samples_sequences
     
     # this will randomly select samples from the dataset
     # and save them to a folder

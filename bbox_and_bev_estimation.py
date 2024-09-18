@@ -7,6 +7,8 @@ from utils import get_camera_matrix
 from metric_depth import get_depth_estimate, get_3d_points, get_3d_estimation_in_bbox
 import open3d as o3d
 import cv2
+import os
+import tqdm
 
 class BBoxAndBevEstimation(ABC):
     def __init__(self, config: Dict[str, Any]):
@@ -147,13 +149,28 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
         
     def estimate(self, samples: List[Sample]) -> List[List[Location]]:
         all_estimated_locations: List[List[Location]] = []
+        
+        cache_dir = 'depth_cache'
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        
+        print("Running MDEBBoxAndBevEstimation")
 
-        for sample in samples:
+        for sample in tqdm.tqdm(samples):
             estimated_locations: List[Location] = []
             
+            frame_filepath = sample.rgb_image_filepath
+            file_basename = os.path.basename(frame_filepath)
+            file_basename = file_basename.split('.')[0]
+            cache_filepath = f"{cache_dir}/depth_estimate_{file_basename}.npy"
+            if not os.path.exists(cache_filepath):
+                depth = get_depth_estimate(sample.get_img(), self.scaled_intrinsics, self.model, self.mean, self.std,
+                                            self.pad_info, self.input_size, self.padding, self.pad_h, self.pad_w, self.pad_h_half, self.pad_w_half)
+                np.save(cache_filepath, depth.cpu().numpy())
+            else:
+                depth = np.load(cache_filepath)
+                depth = torch.from_numpy(depth).to(self.device)
             # get the bev location from the depth estimation
-            depth = get_depth_estimate(sample.get_img(), self.scaled_intrinsics, self.model, self.mean, self.std,
-                                        self.pad_info, self.input_size, self.padding, self.pad_h, self.pad_w, self.pad_h_half, self.pad_w_half)
             points_3d = get_3d_points(depth, self.inv_camera_matrix, self.extrinsics)
             
             lart_data = sample.get_lart_data()
@@ -177,11 +194,25 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
         return all_estimated_locations
     
     def visualize_point_cloud(self, samples: List[Sample]):
+        cache_dir = 'depth_cache'
+        if not os.path.exists(cache_dir):
+            os.makedirs(cache_dir)
+        
         for sample in samples:
             # let's get the 3d point cloud and visualize it :)
             frame = sample.get_img()
-            depth = get_depth_estimate(frame, self.scaled_intrinsics, self.model, self.mean, self.std,
-                                        self.pad_info, self.input_size, self.padding, self.pad_h, self.pad_w, self.pad_h_half, self.pad_w_half)
+            # check cache for depth estimate
+            frame_filepath = sample.rgb_image_filepath
+            file_basename = os.path.basename(frame_filepath)
+            file_basename = file_basename.split('.')[0]
+            cache_filepath = f"{cache_dir}/depth_estimate_{file_basename}.npy"
+            if not os.path.exists(cache_filepath):
+                depth = get_depth_estimate(frame, self.scaled_intrinsics, self.model, self.mean, self.std,
+                                            self.pad_info, self.input_size, self.padding, self.pad_h, self.pad_w, self.pad_h_half, self.pad_w_half)
+                np.save(cache_filepath, depth.cpu().numpy())
+            else:
+                depth = np.load(cache_filepath)
+                depth = torch.from_numpy(depth).to(self.device)
             points_3d = get_3d_points(depth, self.inv_camera_matrix, self.extrinsics)
 
             # Create a PointCloud object
