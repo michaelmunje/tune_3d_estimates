@@ -1,0 +1,805 @@
+"""
+Copyright (c) 2023 Arthur King Zhang arthurz@cs.utexas.edu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following condition
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Softwar
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+# from sensor_msgs.msg import PointField
+
+ENV_CODA_ROOT_DIR = 'CODA_ROOT_DIR' 
+
+"""
+VISUALIZATION SETTINGS
+"""
+SEM_POINT_SIZE = 1 # pixels
+
+"""
+SENSOR PROCESSING CONSTANTS
+"""
+# _DATATYPES = {}
+# _DATATYPES[PointField.INT8]    = ('b', 1)
+# _DATATYPES[PointField.UINT8]   = ('B', 1)
+# _DATATYPES[PointField.INT16]   = ('h', 2)
+# _DATATYPES[PointField.UINT16]  = ('H', 2)
+# _DATATYPES[PointField.INT32]   = ('i', 4)
+# _DATATYPES[PointField.UINT32]  = ('I', 4)
+# _DATATYPES[PointField.FLOAT32] = ('f', 4)
+# _DATATYPES[PointField.FLOAT64] = ('d', 8)
+
+"""
+DATASET DIRECTORY DEFINITIONS
+"""
+TRED_RAW_DIR            = "3d_raw"
+TRED_COMP_DIR           = "3d_comp"
+SEMANTIC_LABEL_DIR      = "3d_semantic"
+TRED_BBOX_LABEL_DIR     = "3d_bbox"
+TWOD_BBOX_LABEL_TYPE    = "2d_bbox"
+TWOD_RECT_DIR           = "2d_rect"
+METADATA_DIR            = "metadata"
+CALIBRATION_DIR         = "calibrations"
+TWOD_RAW_DIR            = "2d_raw"
+TWOD_PROJ_DIR           = "2d_proj"
+POSES_DIR               = "poses"
+DENSE_POSES_DIR         = "dense"
+DENSE_POSES_FULL_DIR    = "poses/dense"
+DENSE_POSES_GLOBAL_FULL_DIR    = "poses/dense_global"
+POSES_IMU_DIR           = "poses/imu"
+POSES_MAG_DIR           = "poses/mag"
+TIMESTAMPS_DIR          = "timestamps"
+
+DEFAULT_FILETYPES = {
+    "2d_raw": ["png"],
+    "3d_raw": ["bin", "png"],
+    "3d_comp": ["bin"],
+    "3d_semantic": ["bin"],
+    "3d_bbox": ["json"],
+    "2d_rect": ["png"],
+    "poses": ["txt"],
+    "timestamps": ["txt"]
+}
+
+DEFAULT_POINTCLOUD_SHAPE = [1024, 128]
+
+"""
+Annotation Mappings
+"""
+SAGEMAKER_TO_COMMON_ANNO = {
+    #Frame Specific
+    "frameName": "frame",
+    "boundingCuboids": "3dbbox",
+    "frameAttributes": "frameAttributes",
+    # Object Specific 
+    "objectName": "instanceId",
+    "label": "classId",
+    "centerX": "cX",
+    "centerY": "cY",
+    "centerZ": "cZ",
+    "length": "l",
+    "width": "w",
+    "height": "h",
+    "roll": "r",
+    "pitch": "p",
+    "yaw": "y",
+    "labelCategoryAttributes": "labelCategoryAttributes",
+    "Occlusion Status": "isOccluded",
+    "Nav Behavior": "behavior"
+}
+
+"""
+BBOX CLASS CONSTANTS
+"""
+BBOX_CLASS_VIZ_LIST = [  
+    # Dynamic Classes
+    "Car"                   ,
+    "Pedestrian"            ,
+    "Bike"                  ,
+    "Motorcycle"            ,
+    "Golf Cart"             ,
+    "Truck"                 , # Unused
+    "Scooter"               ,
+    # Static Classes
+    "Tree"                  ,
+    "Traffic Sign"          ,
+    "Canopy"                ,
+    "Traffic Light"         ,
+    "Bike Rack"             ,
+    "Bollard"               ,
+    "Construction Barrier"  ,
+    "Parking Kiosk"         ,
+    "Mailbox"               ,
+    "Fire Hydrant"          ,
+    # Static Class Mixed
+    "Freestanding Plant"    ,
+    "Pole"                  ,
+    "Informational Sign"    ,
+    "Door"                  ,
+    "Fence"                 ,
+    "Railing"               ,
+    "Cone"                  ,
+    "Chair"                 ,
+    "Bench"                 ,
+    "Table"                 ,
+    "Trash Can"             ,
+    "Newspaper Dispenser"   ,
+    # Static Classes Indoor
+    "Room Label"            ,
+    "Stanchion"             ,
+    "Sanitizer Dispenser"   ,
+    "Condiment Dispenser"   ,
+    "Vending Machine"       ,
+    "Emergency Aid Kit"     ,
+    "Fire Extinguisher"     ,
+    "Computer"              ,
+    "Television"            ,
+    "Other"                 ,
+    "Horse"                 ,
+    # New Classes
+    "Pickup Truck"          ,
+    "Delivery Truck"        ,
+    "Service Vehicle"       ,
+    "Utility Vehicle"       ,
+    "Fire Alarm"            ,
+    "ATM"                   ,
+    "Cart"                  ,
+    "Couch"                 ,
+    "Traffic Arm"           ,
+    "Wall Sign"             ,
+    "Floor Sign"            ,
+    "Door Switch"           ,
+    "Emergency Phone"       ,
+    "Dumpster"              ,
+    "Vacuum Cleaner"        ,
+    "Segway"                ,
+    "Bus"                   ,
+    "Skateboard"            ,
+    "Water Fountain"        
+]
+
+BBOX_CLASS_REMAP = {
+    "Scooter":              "Scooter",
+    "Bike":                 "Bike",
+    "Car":                  "Vehicle",
+    "Motorcycle":           "Motorcycle",
+    "Golf Cart":            "Vehicle",
+    "Truck":                "Vehicle",
+    "Pedestrian":            "Pedestrian",
+    "Segway":               "WheeledBoard",
+    "Bus":                  "Vehicle",
+    "Skateboard":           "WheeledBoard",
+    # Static Classes     
+    "Tree":                 "Tree",
+    "Traffic Sign":         "Sign",
+    "Canopy":               "Canopy",
+    "Traffic Light":       "Traffic Light",
+    "Bike Rack":            "Bike Rack",
+    "Bollard":              "Barrier",
+    "Construction Barrier": "Barrier",
+    "Parking Kiosk":        "Dispenser",
+    "Mailbox":              "Dispenser",
+    "Fire Hydrant":         "Fire Hydrant",
+    # Static Class Mixed
+    "Freestanding Plant":   "Plant",
+    "Pole":                 "Pole",
+    "Informational Sign":   "Sign",
+    "Door":                 "Barrier",
+    "Fence":                "Barrier",
+    "Railing":              "Barrier",
+    "Cone":                 "Cone",
+    "Chair":                "Chair",
+    "Bench":                "Bench",
+    "Table":                "Table",
+    "Trash Can":            "Trash Can",
+    "Newspaper Dispenser":  "Dispenser",
+    # Static Classes Indoor
+    "Room Label":           "Sign",
+    "Stanchion":            "Barrier",
+    "Sanitizer Dispenser":  "Dispenser",
+    "Condiment Dispenser":  "Dispenser",
+    "Vending Machine":      "Dispenser",
+    "Emergency Aid Kit":    "Dispenser",
+    "Fire Extinguisher":    "Dispenser",
+    "Computer":             "Screen",
+    "Television":           "Screen",
+    "Other":                "Other",
+    "Horse":                "Other",
+    "Pickup Truck":         "Vehicle",
+    "Delivery Truck":       "Vehicle",
+    "Service Vehicle":      "Vehicle",
+    "Utility Vehicle":      "Vehicle",
+    "Fire Alarm":           "Fire Alarm",
+    "ATM":                  "Dispenser",
+    "Cart":                 "Cart",
+    "Couch":                "Couch",
+    "Traffic Arm":          "Traffic Arm",
+    "Wall Sign":            "Sign",
+    "Floor Sign":           "Sign"
+}
+
+BBOX_CLASS_TO_ID = {
+    # Dynamic Classes
+    "Car"                   : 0,
+    "Pedestrian"            : 1,
+    "Bike"                  : 2,
+    "Motorcycle"            : 3,
+    "Golf Cart"             : 4, # Unused
+    "Truck"                 : 5, # Unused
+    "Scooter"               : 6,
+    # Static Classes
+    "Tree"                  : 7,
+    "Traffic Sign"          : 8,
+    "Canopy"                : 9,
+    "Traffic Light"         : 10,
+    "Bike Rack"             : 11,
+    "Bollard"               : 12,
+    "Construction Barrier"  : 13, # Unused
+    "Parking Kiosk"         : 14,
+    "Mailbox"               : 15,
+    "Fire Hydrant"          : 16,
+    # Static Class Mixed
+    "Freestanding Plant"    : 17,
+    "Pole"                  : 18,
+    "Informational Sign"    : 19,
+    "Door"                  : 20,
+    "Fence"                 : 21,
+    "Railing"               : 22,
+    "Cone"                  : 23,
+    "Chair"                 : 24,
+    "Bench"                 : 25,
+    "Table"                 : 26,
+    "Trash Can"             : 27,
+    "Newspaper Dispenser"   : 28,
+    # Static Classes Indoor
+    "Room Label"            : 29,
+    "Stanchion"             : 30,
+    "Sanitizer Dispenser"   : 31,
+    "Condiment Dispenser"   : 32,
+    "Vending Machine"       : 33,
+    "Emergency Aid Kit"     : 34,
+    "Fire Extinguisher"     : 35,
+    "Computer"              : 36,
+    "Television"            : 37, # unused
+    "Other"                 : 38,
+    "Horse"                 : 39,
+    # New Classes
+    "Pickup Truck"          : 40,
+    "Delivery Truck"        : 41,
+    "Service Vehicle"       : 42,
+    "Utility Vehicle"       : 43,
+    "Fire Alarm"            : 44,
+    "ATM"                   : 45,
+    "Cart"                  : 46,
+    "Couch"                 : 47,
+    "Traffic Arm"           : 48,
+    "Wall Sign"             : 49,
+    "Floor Sign"            : 50,
+    "Door Switch"           : 51,
+    "Emergency Phone"       : 52,
+    "Dumpster"              : 53,
+    "Vacuum Cleaner"        : 54, # unused
+    "Segway"                : 55,
+    "Bus"                   : 56,
+    "Skateboard"            : 57,
+    "Water Fountain"        : 58
+}
+
+OCCLUSION_TO_ID ={
+    "None": 0,
+    "Light": 1,
+    "Medium": 2,
+    "Heavy": 3,
+    "Full": 4,
+    "Unknown": 5,
+    "unknown": 5
+}
+
+OCCUSION_ID_TO_COLOR = [
+    (0.0, 1.0, 0.0, 1.0), # Green
+    (0.0, 1.0, 1.0, 1.0), # Cyan
+    (1.0, 1.0, 0.0, 1.0), # Yellow
+    (1.0, 0.0, 1.0, 1.0), # Magenta
+    (1.0, 0.0, 0.0, 1.0), # Red
+    (0.0, 0.0, 0.0, 1.0), # Black
+    (0.0, 0.0, 0.0, 1.0) # Black
+]
+
+NONRIGID_CLASS_IDS = [6, 7]
+
+BBOX_ID_TO_COLOR = [ # BGR
+    (140, 51, 147),         #0 Car (Blue)
+    (7, 33, 229),           #1 Person (Green)
+    (66, 21, 72),           #2 Bike
+    (67, 31, 116),          #3 Motorcycle (Orange)
+    (159, 137, 254),        #4 Golf Cart (Yellow)
+    (52, 32, 130),          #5 Truck (Purple)
+    (239, 92, 215),         #6 Scooter (Red)
+    (4, 108, 69),           #7 Tree (Gold)
+    (160, 129, 2),          #8 Traffic Sign (Dark Red)
+    (160, 93, 2),           #9 Canopy (Silver)
+    (254, 145, 38),         #10 Traffic Lights (Lime)
+    (227, 189, 1),          #11 Bike Rack (Pink)
+    (202, 79, 74),          #12 Bollard (Gray)
+    (255, 196, 208),        #13 Construction Barrier (Light Orange)
+    (166, 240, 4),          #14 Parking Kiosk (Dark Blue)
+    (113, 168, 3),          #15 Mailbox (Royal Blue)
+    (14, 60, 157),           #16 Fire Hydrant (Red)
+    (41, 159, 115),         #17 Freestanding Plant (Green)
+    (91, 79, 14),           #18 Pole (Texan Orange)
+    (220, 184, 94),         #19 Informational Sign (Yellow)
+    (202, 159, 41),         #20 Door (Dark Orange)
+    (253, 137, 129),        #21 Fence (Brown)
+    (97, 37, 32),           #22 Railing (Orange)
+    (91, 31, 39),           #23 Cone (Light Orange)
+    (24, 55, 95),           #24 Chair (Turquoise)
+    (0, 87, 192),           #25 Bench (Dark Green)
+    (31, 70, 142),          #26 Table (Olive)
+    (24, 45, 66),           #27 Trash Can (Bright Blue)
+    (30, 54, 11),           #28 Newspaper Dispenser (Light Orange)
+    (247, 148, 90),         #29 Room Label (Magenta)
+    (250, 126, 149),        #30 Stanchion (Light Gray)
+    (70, 106, 19),          #31 Sanitizer Dispenser (Turquoise)
+    (128, 132, 0),          #32 Condiment Dispenser (Dark Green)
+    (152, 163, 0),          #33 Vending Machine (Sky Blue)
+    (6, 32, 231),        #34 Emergency Aid Kit (Light Pink)
+    (8, 68, 212),          #35 Fire Extinguisher (Light Red)
+    (18, 34, 119),          #36 Computer (Dark Green)
+    (17, 46, 168),          #37 Television (Black)
+    (203, 226, 37),            #38 Other (Orange)
+    (255, 83, 0),            #39 Horse (Orange)
+    (100, 34, 168),         #40 Pickup Truck (Sky Blue)
+    (150, 69, 253),         #41 Delivery Truck (Neon Pink)
+    (46, 22, 78),           #42 Service Vehicle (Lime)
+    (121, 46, 216),         #43 Utility Vehicle (Green)
+    (37, 95, 238),           #44 Fire Alarm (Blue)
+    (95, 100, 14),          #45 ATM (Light Pink)
+    (25, 97, 119),          #46 Cart (Light Red)
+    (18, 113, 225),         #47 Couch (Dark Green)
+    (207, 66, 89),          #48 Traffic Arm (Black)
+    (215, 80, 2),           #49 Wall Sign (White)
+    (161, 125, 16),         #50 Floor Sign (Light Red)
+    (82, 46, 22),           #51 Door Switch (Dark Green)
+    (28, 42, 65),         #52 Emergency Phone (Light Black)
+    (0, 140, 180),          #53 Dumpster (White)
+    (0, 73, 207),           #54 Vacuum Cleaner (Dark Gray)
+    (120, 94, 242),         #55 Segway
+    (35, 28, 79),           #56 Bus
+    (56, 30, 178),          #57 Skateboard
+    (48, 49, 20)            #58 WAter Fountain 
+]
+
+"""
+TERRAIN SEMANTIC CLASS MAPPINGS
+"""
+SEM_CLASS_TO_ID = {
+    "Unlabeled":            0,
+    "Concrete":             1,
+    "Grass":                2,
+    "Rocks":                3,
+    "Speedway Bricks":      4,
+    "Red Bricks":           5,
+    "Pebble Pavement":      6,
+    "Light Marble Tiling":  7,
+    "Dark Marble Tiling":   8,
+    "Dirt Paths":           9,
+    "Road Pavement":        10,
+    "Short Vegetation":     11,
+    "Porcelain Tile":       12,
+    "Metal Grates":         13,
+    "Blond Marble Tiling":  14,
+    "Wood Panel":           15,
+    "Patterned Tile":       16,
+    "Carpet":               17,
+    "Crosswalk":            18,
+    "Dome Mat":             19,
+    "Stairs":               20,
+    "Door Mat":             21,
+    "Threshold":            22,
+    "Metal Floor":          23,
+    "Unknown":              24
+}
+
+SEM_ID_TO_COLOR = [
+    [0, 0, 0],              # 0 Unknown
+    [47, 171, 97],          # 1 Concrete
+    [200, 77, 159],        # 2 Grass
+    [126, 49, 141],          # 3 Rocks
+    [55, 128, 235],         # 4 Speedway Bricks
+    [8, 149, 174],         # 5 Red Bricks
+    [141, 3, 98],        # 6 Pebble Pavement
+    [203, 110, 74],        # 7 Light Marble Tiling
+    [49, 240, 115],          # 8 Dark Marble Tiling
+    [78, 57, 127],         # 9 Dirt Paths
+    [60, 143, 142],          # 10 Road Pavement
+    [187, 187, 17],        # 11 Short Vegetation
+    [137, 247, 165],        # 12 Porcelain Tile
+    [89, 183, 27],         # 13 Metal Grates
+    [134, 29, 80],        # 14 Blond Marble Tiling
+    [150, 81, 244],        # 15 Wood Panel
+    [163, 77, 159],        # 16 Patterned Tile
+    [60, 100, 116],         # 17 Carpet
+    [156, 207, 153],         # 18 Crosswalk
+    [135, 138, 159],        # 19 Dome Mat
+    [44, 217, 131],        # 20 Stairs
+    [123, 97, 131],        # 21 Door Mat
+    [115, 226, 101],          # 22 Threshold
+    [156, 43, 40],          # 23 Metal Floor
+    [0, 0, 0]               # 24 Unlabeled
+]
+
+"""
+Manifest file generation sensor to subdirectory mappings
+"""
+# from nav_msgs.msg import Odometry
+# from tf2_msgs.msg import TFMessage
+# from sensor_msgs.msg import PointCloud2, CompressedImage, Imu, MagneticField, Image, NavSatFix
+
+# ROSTYPE_TO_CLASS = {
+#     "sensor_msgs/Image": Image,
+#     "sensor_msgs/CompressedImage": CompressedImage,
+#     "ouster_ros/PacketMsg": PointCloud2,
+#     "sensor_sgs/PointCloud2": PointCloud2,
+#     "sensor_msgs/Imu": Imu,
+#     "sensor_msgs/MagneticField": MagneticField,
+#     "sensor_msgs/NavSatFix": NavSatFix,
+#     "nav_msgs/Odometry": Odometry,
+#     "tf2_msgs/TFMessage": TFMessage
+# }
+
+"""
+Sensor Hardware Constants
+"""
+# Converts destaggered OS1 point clouds to x forward, y left, z up convention
+
+SENSOR_TO_XYZ_FRAME = {
+    "/ouster/lidar_packets": [
+        -1, 0, 0, 0,
+        0, -1, 0, 0,
+        0, 0, 1, 0.03618,
+        0, 0, 0, 1      
+    ],
+    "/vectornav/IMU": [
+        1, 0, 0,  0, 
+        0, -1, 0, 0,
+        0, 0, -1, 0,
+        0, 0, 0, 1
+    ],
+    # "/vectornav/IMU": [
+    #     0, 1, 0,  0, 
+    #     -1, 0, 0, 0,
+    #     0, 0, 1, 0,
+    #     0, 0, 0, 1
+    # ],
+    "/vectornav/Odom": [
+        -1, 0, 0,  0, 
+        0, -1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]
+}
+SENSOR_TO_BASE_LINK = {
+    "/ouster/lidar_packets": [
+        -1, 0, 0, 0,
+        0, -1, 0, 0,
+        0, 0, 1, 0.43,
+        0, 0, 0, 1       
+    ],
+    "/vectornav/IMU": [
+        0, -1, 0, 0, 
+        1, 0, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    ]
+}
+
+"""
+TODO: DEPRECATE IN THE FUTURE AND USE PROVIDED CAM0 CALIBRATIONS IN CODa
+"""
+CAM0_CALIBRATIONS = {
+    "distortion": [-0.071430, 0.036078, -0.004514, -0.000722, 0.000000],
+    "camera": [
+        670.95818,   0.     , 617.95349, 
+        0.     , 673.34226, 518.92384,
+        0.     ,   0.     ,   1.
+    ],
+    "projection": [
+        681.99707,   0.     , 596.75923,   0,
+        0.     , 681.99707, 503.14468,   0,
+        0.     ,   0.     ,   1.     ,   0
+    ],
+    "extrinsics": [0.1125, -0.1937500000000003, -0.1906249999999992, -7, -96, 94],
+    "width": 1224,
+    "height": 1024
+}
+
+KITTI_INTRINSIC_FORMAT = {
+    'S': [],
+    'K': [],
+    'D': [],
+    'R': [],
+    'T': [],
+    'S_rect': [],
+    'R_rect': [],
+    'P_rect': []
+}
+
+"""
+DeepenAI Generation
+"""
+DEEPEN_TO_COMMON_ANNO = {
+    #Frame Specific
+    # "file_id": "frame",
+    # "labels": "3dbbox",
+    "attributes": "labelAttributes",
+    "three_d_bbox": ".",
+    "quaternion": ".",
+    # Object Specific 
+    "label_id": "instanceId",
+    "label_category_id": "classId",
+    "cx": "cX",
+    "cy": "cY",
+    "cz": "cZ",
+    "l": "l",
+    "w": "w",
+    "h": "h",
+    "qx": "qx",
+    "qy": "qy",
+    "qz": "qz",
+    "qw": "qw",
+    "Occlusion ": "isOccluded"
+}
+
+
+DEEPEN_SEMANTIC_STR = "%s.dpn"
+
+DEEPEN_IMAGE_PREFIX = """{
+    "images": ["""
+
+DEEPEN_IMAGE_SUFFIX_DICT = {
+    "ts":   0.0,
+    "dhx":  0.0,
+    "dhy":  0.0,
+    "dhz":  0.0, 
+    "dhw":  0.0, 
+    "dpx":  0.0,
+    "dpy":  0.0,
+    "dpz":  0.0
+}
+
+DEEPEN_IMAGE_SUFFIX = """
+    ],
+    "timestamp": %(ts)0.10f,
+    "device_heading": {
+        "x": %(dhx)0.10f,
+        "y": %(dhy)0.10f,
+        "z": %(dhz)0.10f,
+        "w": %(dhw)0.10f
+    },
+    "device_position": {
+        "x": %(dpx)0.10f,
+        "y": %(dpy)0.10f,
+        "z": %(dpz)0.10f
+    },"""
+
+DEEPEN_POINTS_PREFIX = """
+    "points": [
+"""
+
+DEEPEN_POINTS_SUFFIX = """
+    ]
+}"""
+
+DEEPEN_POINT_DICT = {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+}
+DEEPEN_POINT_ENTRY = '''        {
+            "x": %(x)0.10f,
+            "y": %(y)0.10f,
+            "z": %(z)0.10f
+        },
+'''
+
+DEEPEN_IMAGE_DICT = {
+    "ipath":    "",
+    "ts":       0.0,
+    "fx":       0.0,
+    "fy":       0.0, 
+    "cx":       0.0, 
+    "cy":       0.0,
+    "k1":       0.0,
+    "k2":       0.0,
+    "k3":       0.0,
+    "p1":       0.0,
+    "p2":       0.0,
+    "px":      0.0, 
+    "py":      0.0, 
+    "pz":      0.0,
+    "hx":      0.0,
+    "hy":      0.0, 
+    "hz":      0.0, 
+    "hw":      0.0
+}
+
+DEEPEN_IMAGE_ENTRY = '''
+        {
+            "timestamp": %(ts)0.10f,
+            "fx":  %(fx)0.10f,
+            "fy":  %(fy)0.10f,
+            "cx":  %(cx)0.10f,
+            "cy":  %(cy)0.10f,
+            "k1": %(k1)0.10f,
+            "k2": %(k2)0.10f,
+            "k3": %(k3)0.10f,
+            "p1": %(p1)0.10f,
+            "p2": %(p2)0.10f,
+            "image_url": "%(ipath)s",
+            "position": {
+                "x": %(px)0.10f,
+                "y": %(py)0.10f,
+                "z": %(pz)0.10f
+            },
+            "heading": {
+                "x": %(hx)0.10f,
+                "y": %(hy)0.10f,
+                "z": %(hz)0.10f,
+                "w": %(hw)0.10f
+            },
+            "camera_model": "pinhole"
+        },'''
+
+"""
+Manifest Autogeneration
+"""
+SEQ_TEXT = '{"seq-no": %d,\n'
+
+PREFIX_TEXT = '"prefix": "%s",\n'
+
+NUM_FRAMES_TEXT = '"number-of-frames": %d,\n'
+
+FRAMES_START_TEXT = '"frames": [\n'
+
+FRAME_TEXT_DICT = {
+    "frameno":  0, 
+    "ts":       0.0, 
+    "frame":    "", 
+    "evppx":    0.0, 
+    "evppy":    0.0, 
+    "evppz":    0.0, 
+    "evphx":    0.0, 
+    "evphy":    0.0, 
+    "evphz":    0.0, 
+    "evphw":    0.0, 
+    "ipath":    "",
+    "its":       0.0,
+    "fx":       0.0,
+    "fy":       0.0, 
+    "cx":       0.0, 
+    "cy":       0.0,
+    "k1":       0.0,
+    "k2":       0.0,
+    "k3":       0.0,
+    "k4":       0.0,
+    "p1":       0.0,
+    "p2":       0.0,
+    "ipx":      0.0, 
+    "ipy":      0.0, 
+    "ipz":      0.0,
+    "ihx":      0.0,
+    "ihy":      0.0, 
+    "ihz":      0.0, 
+    "ihw":      0.0
+}
+
+FRAME_TEXT = '''    {
+        "frame-no": %(frameno)d,
+        "unix-timestamp": %(ts)0.10f,
+        "frame": "%(frame)s", 
+        "format": "binary/xyz", 
+        "ego-vehicle-pose":{
+            "position": {
+                "x": %(evppx)0.10f,
+                "y":  %(evppy)0.10f,
+                "z":  %(evppz)0.10f
+            },
+            "heading": {
+                "qx":  %(evphx)0.10f,
+                "qy":  %(evphy)0.10f,
+                "qz":  %(evphz)0.10f,
+                "qw":  %(evphw)0.10f
+            }
+        },
+        "images": [{
+            "image-path": "%(ipath)s",
+            "unix-timestamp":  %(ts)0.10f,
+            "fx":  %(fx)0.10f,
+            "fy":  %(fy)0.10f,
+            "cx":  %(cx)0.10f,
+            "cy":  %(cy)0.10f,
+            "k1": %(k1)0.10f,
+            "k2": %(k2)0.10f,
+            "k3": %(k3)0.10f,
+            "k4": %(k4)0.10f,
+            "p1": %(p1)0.10f,
+            "p2": %(p2)0.10f,
+            "skew": 0,
+            "position": {
+                "x":  %(ipx)0.10f,
+                "y":  %(ipy)0.10f,
+                "z":  %(ipz)0.10f
+            },
+            "heading": {
+                "qx":  %(ihx)0.10f,
+                "qy":  %(ihy)0.10f,
+                "qz":  %(ihz)0.10f,
+                "qw":  %(ihw)0.10f
+            },
+            "camera-model": "pinhole"
+        }]
+    }'''
+
+FRAMES_END_TEXT = ']}'
+
+MANIFEST_PATH_DICT = {
+    "manifest_prefix":  "", 
+    "sequence_filename": ""
+}
+
+MANIFEST_PATH_STR = '''{"source-ref": "%(manifest_prefix)s/%(sequence_filename)s"}'''
+
+# Kitti360 Autogeneration
+
+KITTI360_INTRINSIC_XML = '''<?xml version="1.0"?><intrincis_perspective><fx>%(fx)0.10f</fx><fy>%(fy)0.10f</fy><ox>%(ox)0.10f</ox><oy>%(oy)0.10f</oy><width>%(w)i</width><height>%(h)i</height></intrincis_perspective>'''
+
+CODA_ANNOTATION_DICT = {
+    "frame": 0,
+    "3dbbox": []
+}
+
+CODA_ANNOTATION_OBJECT_DICT = {
+    "instanceId": "",
+    "classId": "",
+    "cX": 0.0,
+    "cY": 0.0,
+    "cZ": 0.0,
+    "l": 0.0,
+    "w": 0.0,
+    "h": 0.0,
+    "r": 0.0,
+    "p": 0.0,
+    "y": 0.0,
+    "labelCategoryAttributes": {
+        "isOccluded": "No"
+    }
+}
+
+"""
+ZED DEPTH SETTINGS (CAM3/CAM4)
+"""
+STEREO_SETTINGS = {
+    "cam2": {
+        "min_depth": 0.25,
+        "max_depth": 2.88 #m
+    },
+    "cam3": { # HD720
+        "min_depth": 0.7,
+        "max_depth": 10 # m
+    },
+    "cam4": { # HD720
+        "min_depth": 0.7,
+        "max_depth": 10 # m
+    }
+}

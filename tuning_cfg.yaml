@@ -1,7 +1,7 @@
 x_min: 0.0
-x_max: 10.0
-y_min: -5.0
-y_max: 5.0
+x_max: 20.0
+y_min: -10.0
+y_max: 10.0
 z_min: 0.0
 z_max: 2.0
 traj_idx: 13
@@ -10,6 +10,7 @@ use_gamma_correction: false
 use_gaussian_blur: true
 use_undistort_correction: true
 debug_mode: false
+random_seed: 42
 
 intrinsics:
   - 730.271578753826
@@ -43,3 +44,14 @@ input_height: 1024
 
 # monocular depth estimation stuff
 metric_3d_model: metric3d_vit_small
+lart_folder: coda-devkit/data/eval_lart_data
+sample_save_folder: estimations_sample_save
+
+bbox_and_bev_estimation: LartBBoxAndBevEstimation
+bbox_matching: ManualBBoxMatching
+bbox_matching_config:
+  matching_filepath: coda-devkit/corresponding_trackings.json
+
+frame_interval_lengths: 75
+frame_interval_sample_stride: 3
+frame_intervals_start_indices: [900, 1000, 1100]
