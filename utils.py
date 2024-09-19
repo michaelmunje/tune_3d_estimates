@@ -184,6 +184,9 @@ class Sample:
         # also create mapping from instanceId to Entity
         self.instance_id_to_entity = {obj.id: obj for obj in self.objects}
         self.lart_folder = lart_folder
+        
+    def get_sample_idx(self):
+        return int(self.rgb_image_filepath.split('/')[-1].replace('.png', '').split('_')[-1])
 
     def get_img(self):
         return cv2.imread(self.rgb_image_filepath)
