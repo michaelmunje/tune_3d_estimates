@@ -42,6 +42,11 @@ translation_vector:
 input_width: 1224
 input_height: 1024
 
+smooth_robot_trajectory: false
+smooth_estimate_trajectories: false
+interpolate_between_trajectory: true
+smooth_label_trajectories: false
+
 # monocular depth estimation stuff
 metric_3d_model: metric3d_vit_small
 lart_folder: coda-devkit/data/eval_lart_data

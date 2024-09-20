@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict
-from utils import Location, Bbox3d
+from structures import LocationWith2DBBox, LocationWith3dBBox
 import json
 
 class BBoxMatching(ABC):
     @abstractmethod
     def matching(self, 
-                 location_estimates: List[Location], 
-                 bbox2d_labels: List[Location], 
-                 bbox3d_labels: List[Bbox3d]) -> Dict[int, int]:
+                 location_estimates: List[LocationWith2DBBox], 
+                 bbox3d_labels: List[LocationWith3dBBox]) -> Dict[str, str]:
         pass
     
 class ManualBBoxMatching(BBoxMatching):
@@ -19,7 +18,6 @@ class ManualBBoxMatching(BBoxMatching):
             self.matching_dict = json.load(f)
 
     def matching(self, 
-                 location_estimates: List[Location], 
-                 bbox2d_labels: List[Location], 
-                 bbox3d_labels: List[Bbox3d]) -> Dict[int, int]:
+                 location_estimates: List[LocationWith2DBBox], 
+                 bbox3d_labels: List[LocationWith3dBBox]) -> Dict[str, str]:
         return self.matching_dict

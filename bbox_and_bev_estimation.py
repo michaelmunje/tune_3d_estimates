@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Dict, Any
-from utils import Sample, Location, Bbox3d
+from structures import Sample, LocationWith2DBBox, LocationWith3dBBox
 import torch
 import numpy as np
-from utils import get_camera_matrix
+from structures import get_camera_matrix
 from metric_depth import get_depth_estimate, get_3d_points, get_3d_estimation_in_bbox
 import open3d as o3d
 import cv2
@@ -54,7 +54,7 @@ class BBoxAndBevEstimation(ABC):
         ]
         
     @abstractmethod
-    def estimate(self, samples: List[Sample]) -> List[List[Location]]:
+    def estimate(self, samples: List[Sample]) -> List[List[LocationWith2DBBox]]:
         pass
     
 class LartBBoxAndBevEstimation(BBoxAndBevEstimation):
@@ -62,12 +62,12 @@ class LartBBoxAndBevEstimation(BBoxAndBevEstimation):
         super().__init__(config)
         self.lart_folder = config['lart_folder']
         
-    def estimate(self, samples: List[Sample]) -> List[List[Location]]:
-        all_estimated_locations: List[List[Location]] = []
+    def estimate(self, samples: List[Sample]) -> List[List[LocationWith2DBBox]]:
+        all_estimated_locations: List[List[LocationWith2DBBox]] = []
         # get lart data
         for sample in samples:
             lart_data = sample.get_lart_data()
-            estimated_locations: List[Location] = []
+            estimated_locations: List[LocationWith2DBBox] = []
             # get the bbox2d and bev location from the lart data
             for tracking_id in lart_data:
                 estimate = lart_data[tracking_id]
@@ -80,7 +80,7 @@ class LartBBoxAndBevEstimation(BBoxAndBevEstimation):
                 if w == 0 or h == 0:
                     continue
                 
-                estimated_location = Location(x, y, w, h, joint_coords[2], -joint_coords[0], -joint_coords[1], tracking_id, sample.rgb_image_filepath)
+                estimated_location = LocationWith2DBBox(x, y, w, h, joint_coords[2], -joint_coords[0], -joint_coords[1], tracking_id, sample.rgb_image_filepath)
                 estimated_locations.append(estimated_location)
             all_estimated_locations.append(estimated_locations)
         return all_estimated_locations
@@ -147,8 +147,8 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
         self.model.eval()
         self.model = self.model.to(self.device)
         
-    def estimate(self, samples: List[Sample]) -> List[List[Location]]:
-        all_estimated_locations: List[List[Location]] = []
+    def estimate(self, samples: List[Sample]) -> List[List[LocationWith2DBBox]]:
+        all_estimated_locations: List[List[LocationWith2DBBox]] = []
         
         cache_dir = 'depth_cache'
         if not os.path.exists(cache_dir):
@@ -157,7 +157,7 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
         print("Running MDEBBoxAndBevEstimation")
 
         for sample in tqdm.tqdm(samples):
-            estimated_locations: List[Location] = []
+            estimated_locations: List[LocationWith2DBBox] = []
             
             frame_filepath = sample.rgb_image_filepath
             file_basename = os.path.basename(frame_filepath)
@@ -188,7 +188,7 @@ class MDEBBoxAndBevEstimation(BBoxAndBevEstimation):
                                                             point_cloud=points_3d, 
                                                             bbox=bbox2d)
                 avg_3d_location = avg_3d_location.cpu().numpy()
-                estimated_location = Location(x, y, w, h, avg_3d_location[0], avg_3d_location[1], avg_3d_location[2], tracking_id, sample.rgb_image_filepath)
+                estimated_location = LocationWith2DBBox(x, y, w, h, avg_3d_location[0], avg_3d_location[1], avg_3d_location[2], tracking_id, sample.rgb_image_filepath)
                 estimated_locations.append(estimated_location)
             all_estimated_locations.append(estimated_locations)
         return all_estimated_locations
