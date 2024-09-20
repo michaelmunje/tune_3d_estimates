@@ -241,6 +241,21 @@ class Trajectory:
     def __len__(self):
         return len(self.bev_poses)
     
+def average_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
+    # check each corresponding timestep
+    total_error = 0.0
+    n_timesteps_in_both = 0
+    for timestep in traj.corresponding_timesteps:
+        if timestep in reference_frame_traj.corresponding_timesteps:
+            total_error += np.linalg.norm(traj.get_pose_at_timestep(timestep).get_position_np() - reference_frame_traj.get_pose_at_timestep(timestep).get_position_np())
+            n_timesteps_in_both += 1
+    if n_timesteps_in_both == 0:
+        return 0.0
+    return total_error / n_timesteps_in_both
+
+def final_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
+    return np.linalg.norm(traj.bev_poses[-1].get_position_np() - reference_frame_traj.bev_poses[-1].get_position_np())
+    
 def transform_trajectory_to_initial_pose(traj: Trajectory, reference_frame_traj: Trajectory):
     initial_reference_pose = reference_frame_traj.bev_poses[0]
     for i in range(len(traj.bev_poses)):

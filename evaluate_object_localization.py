@@ -15,7 +15,7 @@ import matplotlib.lines as mlines
 
 import bbox_and_bev_estimation
 import bbox_matching 
-from utils import Sample, LocationWith3dBBox, quaternion_to_yaw, transform_trajectory_to_initial_pose
+from utils import Sample, LocationWith3dBBox, quaternion_to_yaw, transform_trajectory_to_initial_pose, average_displacement_error, final_displacement_error
 import open3d as o3d
 from matplotlib import pyplot as plt
 
@@ -188,7 +188,8 @@ class ObjectLocalizationEvaluator:
                     estimate_trajectory.interpolate_all_missing_poses()
                 if self.smooth_estimate_trajectories:
                     estimate_trajectory.kalman_smooth()
-                    
+                    estimate_trajectory.estimate_yaws()
+
                 timesteps_after_interpolation_and_smoothing = estimate_trajectory.corresponding_timesteps
                 
                 # now let's see if we need to add entries to loc_estimates_by_sample
@@ -308,12 +309,25 @@ class ObjectLocalizationEvaluator:
         assert isinstance(object_estimate_trajectories_seq, list), 'Object estimate trajectories must be a list'
         assert isinstance(object_label_trajectories_seq, list), 'Object label trajectories must be a list'
         
+        # compute metrics
+        ades = 0.0
+        fdes = 0.0
+        n_trajs = 0
+        
         for seq_idx in range(len(samples_sequences)):
             samples = samples_sequences[seq_idx]
             trajectory = self.trajectories[seq_idx]
             object_estimate_trajectories = object_estimate_trajectories_seq[seq_idx]
             object_label_trajectories = object_label_trajectories_seq[seq_idx]
             assert len(samples) == len(trajectory), 'Number of samples and trajectory do not match'
+            
+            for tracking_id in object_estimate_trajectories[i]:
+                coda_tracking_id = matched_ids[tracking_id]
+                ades += average_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
+                fdes += final_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
+                n_trajs += 1
+            
+            # visuals
             track_id_to_color = training_id_colors_each_seq[seq_idx]
 
             seq_bev_filepaths = []
@@ -331,6 +345,12 @@ class ObjectLocalizationEvaluator:
                 seq_bev_filepaths.append(bev_out_filepath)
             # create gif from all the bevs
             self.save_img_bev_gif(seq_bev_filepaths)
+            
+    
+        ades /= n_trajs
+        fdes /= n_trajs
+        print(f'ADES: {ades}, FDES: {fdes}')
+
             
     def save_img_bev_gif(self, bev_filepaths: List[str]):
         frame_duration = 500
