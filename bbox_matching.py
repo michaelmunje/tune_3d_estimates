@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict
-from utils import LocationWith2DBBox, LocationWith3dBBox
+from structures import LocationWith2DBBox, LocationWith3dBBox
 import json
 
 class BBoxMatching(ABC):

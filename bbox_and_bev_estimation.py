@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Dict, Any
-from utils import Sample, LocationWith2DBBox, LocationWith3dBBox
+from structures import Sample, LocationWith2DBBox, LocationWith3dBBox
 import torch
 import numpy as np
-from utils import get_camera_matrix
+from structures import get_camera_matrix
 from metric_depth import get_depth_estimate, get_3d_points, get_3d_estimation_in_bbox
 import open3d as o3d
 import cv2

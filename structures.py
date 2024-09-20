@@ -80,7 +80,9 @@ def get_bev_pose_wrt_initial_pose(bev_pose: BEVPose, bev_reference_pose: BEVPose
     return BEVPose(bev_coords[0], bev_coords[1], transformed_yaw)
 
 class Trajectory:
-    def __init__(self, bev_poses: List[BEVPose], corresponding_timesteps: List[int], possible_timesteps: List[int], id: str, localize: bool):
+    def __init__(self, bev_poses: List[BEVPose], 
+                 corresponding_timesteps: List[int], possible_timesteps: List[int], 
+                 id: str, localize: bool, initial_yaw_estimation: bool = False):
         assert len(bev_poses) == len(corresponding_timesteps), 'Number of bev poses and corresponding timesteps do not match'
         assert len(corresponding_timesteps) <= len(possible_timesteps), 'Number of corresponding timesteps should be less than or equal to possible timesteps'
         self.bev_poses = bev_poses
@@ -100,6 +102,9 @@ class Trajectory:
         self.corresponding_timesteps = corresponding_timesteps
         self.possible_timesteps = possible_timesteps
         self.id = id # can be robot, track id, coda id, etc.
+        
+        if initial_yaw_estimation:
+            self.estimate_yaws()
 
     def get_timestep(self, idx: int):
         return self.corresponding_timesteps[idx]
@@ -157,7 +162,6 @@ class Trajectory:
         new_timestep_idx = (next_timestep_idx + prev_timestep_idx) // 2
         new_timestep = self.possible_timesteps[new_timestep_idx]
         self.corresponding_timesteps.insert(target_idx, new_timestep)
-
         
     def kalman_smooth(self, speed_guess: float = 0.325, process_noise: float = 1.0, measurement_noise: float = 2.0):
         """
@@ -240,60 +244,6 @@ class Trajectory:
     
     def __len__(self):
         return len(self.bev_poses)
-    
-def average_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
-    # check each corresponding timestep
-    total_error = 0.0
-    n_timesteps_in_both = 0
-    for timestep in traj.corresponding_timesteps:
-        if timestep in reference_frame_traj.corresponding_timesteps:
-            total_error += np.linalg.norm(traj.get_pose_at_timestep(timestep).get_position_np() - reference_frame_traj.get_pose_at_timestep(timestep).get_position_np())
-            n_timesteps_in_both += 1
-    if n_timesteps_in_both == 0:
-        return 0.0
-    return total_error / n_timesteps_in_both
-
-def final_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
-    return np.linalg.norm(traj.bev_poses[-1].get_position_np() - reference_frame_traj.bev_poses[-1].get_position_np())
-
-def angular_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
-    total_error = 0.0
-    n_timesteps_in_both = 0
-    for timestep in traj.corresponding_timesteps:
-        if timestep in reference_frame_traj.corresponding_timesteps:
-            traj_yaw = traj.get_pose_at_timestep(timestep).yaw
-            ref_yaw = reference_frame_traj.get_pose_at_timestep(timestep).yaw
-            yaw_diff = np.abs(traj_yaw - ref_yaw)
-            total_error += yaw_diff
-            n_timesteps_in_both += 1
-    if n_timesteps_in_both == 0:
-        return 0.0
-    return total_error / n_timesteps_in_both
-
-def heading_deviation_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
-    total_error = 0.0
-    n_timesteps_in_both = 0
-    for timestep in traj.corresponding_timesteps:
-        if timestep in reference_frame_traj.corresponding_timesteps:
-            traj_yaw = traj.get_pose_at_timestep(timestep).yaw
-            ref_yaw = reference_frame_traj.get_pose_at_timestep(timestep).yaw
-            yaw_diff = np.abs(traj_yaw - ref_yaw)
-            total_error += yaw_diff
-            n_timesteps_in_both += 1
-    if n_timesteps_in_both == 0:
-        return 0.0
-    return total_error / n_timesteps_in_both
-
-def transform_trajectory_to_initial_pose(traj: Trajectory, reference_frame_traj: Trajectory):
-    initial_reference_pose = reference_frame_traj.bev_poses[0]
-    for i in range(len(traj.bev_poses)):
-        current_timestep = traj.corresponding_timesteps[i]
-        reference_pose = reference_frame_traj.get_pose_at_timestep(current_timestep)
-        traj.bev_poses[i] = get_bev_pose_wrt_initial_pose(
-            traj.bev_poses[i], 
-            reference_pose, 
-            initial_reference_pose
-        )
 
 def get_camera_matrix(intrinsics: List[float]) -> torch.Tensor:
     fx, fy, cx, cy = intrinsics
@@ -309,6 +259,17 @@ def quaternion_to_yaw(qw, qx, qy, qz):
     # Yaw calculation from quaternion
     yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
     return yaw
+
+def transform_trajectory_to_initial_pose(traj: Trajectory, reference_frame_traj: Trajectory):
+    initial_reference_pose = reference_frame_traj.bev_poses[0]
+    for i in range(len(traj.bev_poses)):
+        current_timestep = traj.corresponding_timesteps[i]
+        reference_pose = reference_frame_traj.get_pose_at_timestep(current_timestep)
+        traj.bev_poses[i] = get_bev_pose_wrt_initial_pose(
+            traj.bev_poses[i], 
+            reference_pose, 
+            initial_reference_pose
+        )
 
 class LocationWith2DBBox:
     def __init__(self, x: float, y: float, w: float, h: float,
