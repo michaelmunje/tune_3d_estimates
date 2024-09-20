@@ -15,7 +15,7 @@ import matplotlib.lines as mlines
 
 import bbox_and_bev_estimation
 import bbox_matching 
-from utils import Sample, LocationWith3dBBox, quaternion_to_yaw
+from utils import Sample, LocationWith3dBBox, quaternion_to_yaw, transform_trajectory_to_initial_pose
 import open3d as o3d
 from matplotlib import pyplot as plt
 
@@ -44,6 +44,9 @@ class ObjectLocalizationEvaluator:
         self.debug_mode: bool = debug_mode
         
         self.sample_save_folder: str = config["sample_save_folder"]
+        if not os.path.exists(self.sample_save_folder):
+            os.makedirs(self.sample_save_folder)
+
         self.camera_matrix_np: np.ndarray = self.bbox_and_bev_estimation.camera_matrix_np
         self.distortion_coeffs_np: np.ndarray = self.bbox_and_bev_estimation.distortion_coeffs_np
         self.extrinsics_np: np.ndarray = self.bbox_and_bev_estimation.extrinsics_np
@@ -71,7 +74,7 @@ class ObjectLocalizationEvaluator:
         
         for start_idx in self.frame_intervals_start_indices:
             self.frame_sequences.append(list(range(start_idx, start_idx + self.frame_interval_lengths, self.frame_interval_sample_stride)))
-            
+        
         # check if the filepath exists, if not try 1 lower
         for frame_seq in self.frame_sequences:
             for i, frame_idx in enumerate(frame_seq):
@@ -80,7 +83,7 @@ class ObjectLocalizationEvaluator:
                     print(f'Frame {frame_idx} does not exist. Trying 1 lower.')
                     frame_idx -= 1
                     assert frame_idx >= 0, 'Frame index cannot be negative.'
-                frame_seq[i] = str(frame_idx)
+                frame_seq[i] = frame_idx
         
         assert type(self.traj_idx) == int, 'Trajectory index must be an integer. Otherwise, you\'ll need to modify this dict below.' 
         
@@ -91,10 +94,13 @@ class ObjectLocalizationEvaluator:
         for idx, pose in enumerate(self.poses):
             x, y = pose[1], pose[2]
             yaw = quaternion_to_yaw(pose[4], pose[5], pose[6], pose[7])
-            self.frame_idx_to_bev_pose[idx] = BEVPose(x, y, yaw)
+            self.frame_idx_to_bev_pose[int(idx)] = BEVPose(x, y, yaw)
 
-        # for each frame sequence, create a trajectory
-        self.trajectories: List[Trajectory] = [Trajectory([self.frame_idx_to_bev_pose[i] for i in frame_seq], localize=True) for frame_seq in self.frame_sequences]
+        # for each frame sequence, create a trajectory for poses
+        self.trajectories: List[Trajectory] = []
+        for frame_seq in self.frame_sequences:
+            bevs = [self.frame_idx_to_bev_pose[frame_idx] for frame_idx in frame_seq]
+            self.trajectories.append(Trajectory(bevs, frame_seq, id='robot', localize=True))
 
     def frame_idx_to_img_fp(self, frame_idx: int) -> str:
         return f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
@@ -145,11 +151,10 @@ class ObjectLocalizationEvaluator:
     
     def get_object_estimate_trajectories(self, samples_sequences: List[List[Sample]], loc_estimates_by_sample: Dict[str, Dict[str, LocationWith2DBBox]], matched_ids: Dict[str, str]) -> List[Dict[str, Dict[str, Trajectory]]]:
         # for each sample sequence, create a trajectory
-        seq_object_estimate_trajectories: List[Dict[str, Dict[str, Trajectory]]] = [] # (for each sample seq), key is sample filepath, value is a dict tracking_id -> trajectory
+        seq_object_estimate_trajectories: List[Dict[str, Trajectory]] = [] # (for each sample seq), key is track_id, value is trajectory
         
         for samples in samples_sequences:
             tracking_id_to_bev: Dict[str, List[Tuple[int, BEVPose]]] = {}
-            trajectory_by_sample_filepath: Dict[str, Dict[str, Trajectory]] = {sample_filepath: {} for sample_filepath in loc_estimates_by_sample.keys()}
             for sample in samples:
                 sample_filepath = sample.rgb_image_filepath
                 sample_idx = sample.get_sample_idx()
@@ -159,14 +164,39 @@ class ObjectLocalizationEvaluator:
                         if tracking_id not in tracking_id_to_bev:
                             tracking_id_to_bev[tracking_id] = []
                         tracking_id_to_bev[tracking_id].append((sample_idx, loc_estimates[tracking_id].get_bev()))
-            trajectory_by_sample_filepath = {}
+            trajectory_by_sample_filepath: Dict[str, Trajectory] = {}
             for tracking_id in tracking_id_to_bev:
                 indices_and_bev_poses = tracking_id_to_bev[tracking_id]
                 bev_poses = [bev_pose for _, bev_pose in indices_and_bev_poses]
                 indices = [idx for idx, _ in indices_and_bev_poses]
-                trajectory_by_sample_filepath[sample_filepath][tracking_id] = Trajectory(bev_poses, indices, id=tracking_id, localize=False)
+                trajectory_by_sample_filepath[tracking_id] = Trajectory(bev_poses, indices, id=tracking_id, localize=False)
             seq_object_estimate_trajectories.append(trajectory_by_sample_filepath)
         return seq_object_estimate_trajectories
+    
+    def get_object_label_trajectories(self, samples_sequences: List[List[Sample]], loc_labels_by_sample: Dict[str, Dict[str, LocationWith3dBBox]], matched_ids: Dict[str, str]) -> List[Dict[str, Dict[str, Trajectory]]]:
+        # for each sample sequence, create a trajectory
+        seq_object_label_trajectories: List[Dict[str, Trajectory]] = [] # (for each sample seq), key is track_id, value is trajectory
+        matched_ids_inv = {v: k for k, v in matched_ids.items()}
+        
+        for samples in samples_sequences:
+            tracking_id_to_bev: Dict[str, List[Tuple[int, BEVPose]]] = {}
+            for sample in samples:
+                sample_filepath = sample.rgb_image_filepath
+                sample_idx = sample.get_sample_idx()
+                loc_labels = loc_labels_by_sample[sample_filepath]
+                for tracking_id in loc_labels.keys():
+                    if tracking_id in matched_ids_inv:
+                        if tracking_id not in tracking_id_to_bev:
+                            tracking_id_to_bev[tracking_id] = []
+                        tracking_id_to_bev[tracking_id].append((sample_idx, loc_labels[tracking_id].get_bev()))
+            trajectory_by_sample_filepath: Dict[str, Trajectory] = {}
+            for tracking_id in tracking_id_to_bev:
+                indices_and_bev_poses = tracking_id_to_bev[tracking_id]
+                bev_poses = [bev_pose for _, bev_pose in indices_and_bev_poses]
+                indices = [idx for idx, _ in indices_and_bev_poses]
+                trajectory_by_sample_filepath[tracking_id] = Trajectory(bev_poses, indices, id=tracking_id, localize=False)
+            seq_object_label_trajectories.append(trajectory_by_sample_filepath)
+        return seq_object_label_trajectories
 
     def get_track_id_colors(self, samples_sequences: List[List[Sample]], loc_estimates_by_sample: Dict[str, Dict[str, LocationWith2DBBox]], matched_ids: Dict[str, str]) -> List[Dict[str, Tuple[float, float, float]]]:
         # track id to color
@@ -191,64 +221,52 @@ class ObjectLocalizationEvaluator:
     def evaluate_sequences(self):
         samples_sequences: List[List[Sample]] = self.load_samples()
         loc_estimates_by_sample, loc_labels_by_sample, matched_ids = self.get_estimates_and_labels_per_sample(samples_sequences)
-
-        # correct all of them to be w.r.t. the initial pose (in corresponding sequence)
-        for samples in samples_sequences:
-            initial_frame_idx = samples[0].get_sample_idx()
-            for sample in samples:
-                sample_filepath = sample.rgb_image_filepath
-                current_sample_idx = sample.get_sample_idx()
-                for tracking_id in loc_estimates_by_sample[sample_filepath]:
-                    bev_coords = loc_estimates_by_sample[sample_filepath][tracking_id].get_bev_location()
-                    updated_bev = self.get_bev_pose_wrt_initial_pose(
-                        bev_coords=bev_coords, 
-                        current_pose_frame_idx=current_sample_idx, 
-                        initial_pose_frame_idx=initial_frame_idx
-                    )
-                    loc_estimates_by_sample[sample_filepath][tracking_id].cX = updated_bev[0]
-                    loc_estimates_by_sample[sample_filepath][tracking_id].cY = updated_bev[1]
-                    
-                    label_tracking_id = matched_ids[tracking_id]
-                    if label_tracking_id in loc_labels_by_sample[sample_filepath]:
-                        bev_coords = loc_labels_by_sample[sample_filepath][label_tracking_id].get_bev_location()
-                        updated_bev = self.get_bev_pose_wrt_initial_pose(
-                            bev_coords=bev_coords,
-                            current_pose_frame_idx=current_sample_idx,
-                            initial_pose_frame_idx=initial_frame_idx
-                        )
-                        loc_labels_by_sample[sample_filepath][label_tracking_id].cX = updated_bev[0]
-                        loc_labels_by_sample[sample_filepath][label_tracking_id].cY = updated_bev[1]
-
-            
-        if not os.path.exists(self.sample_save_folder):
-            os.makedirs(self.sample_save_folder)
-            
+        object_estimate_trajectories_seq = self.get_object_estimate_trajectories(samples_sequences, loc_estimates_by_sample, matched_ids)
+        object_label_trajectories_seq = self.get_object_label_trajectories(samples_sequences, loc_labels_by_sample, matched_ids)
+        
+        assert len(object_estimate_trajectories_seq) == len(object_label_trajectories_seq), 'Number of estimate and label trajectories do not match'
+        assert len(samples_sequences) == len(object_estimate_trajectories_seq), 'Number of sequences and trajectories do not match'
+        assert len(object_estimate_trajectories_seq) == len(self.trajectories), 'Number of sequences and trajectories do not match'
+        
+        for i in range(len(self.trajectories)):
+            for tracking_id in object_estimate_trajectories_seq[i]:
+                assert type(object_estimate_trajectories_seq[i][tracking_id]) == Trajectory, 'Object estimate trajectory must be of type Trajectory'
+                object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
+                transform_trajectory_to_initial_pose(object_estimate_trajectories_seq[i][tracking_id], self.trajectories[i])
+            for coda_tracking_id in object_label_trajectories_seq[i]:
+                assert type(object_label_trajectories_seq[i][coda_tracking_id]) == Trajectory, 'Object label trajectory must be of type Trajectory'
+                object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
+                transform_trajectory_to_initial_pose(object_label_trajectories_seq[i][coda_tracking_id], self.trajectories[i])
+        
         training_id_colors_each_seq = self.get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
             
         assert len(training_id_colors_each_seq) == len(samples_sequences), 'Number of sequences and colors do not match'
         assert len(self.trajectories) == len(samples_sequences), 'Number of sequences and trajectories do not match'
         
+        assert isinstance(object_estimate_trajectories_seq, list), 'Object estimate trajectories must be a list'
+        assert isinstance(object_label_trajectories_seq, list), 'Object label trajectories must be a list'
+        
         for seq_idx in range(len(samples_sequences)):
             samples = samples_sequences[seq_idx]
             trajectory = self.trajectories[seq_idx]
+            object_estimate_trajectories = object_estimate_trajectories_seq[seq_idx]
+            object_label_trajectories = object_label_trajectories_seq[seq_idx]
             assert len(samples) == len(trajectory), 'Number of samples and trajectory do not match'
             track_id_to_color = training_id_colors_each_seq[seq_idx]
 
-            prev_sample_filepath = None
-            prev_robot_pose = None
             seq_bev_filepaths = []
             for i in range(len(samples)):
                 sample_filepath = samples[i].rgb_image_filepath
                 bev_out_filepath = f'{self.sample_save_folder}/BEV_visualization_{sample_filepath.split("/")[-1]}'
                 current_sample_filepath = sample_filepath
-                current_robot_pose = trajectory[i]
-                self.save_bev_visualization(current_robot_pose, prev_robot_pose, 
-                                                 loc_estimates_by_sample, loc_labels_by_sample, 
-                                                 current_sample_filepath, prev_sample_filepath, 
-                                                 matched_ids, fp=bev_out_filepath, tracking_id_colors=track_id_to_color)
+                current_robot_pose = trajectory.bev_poses[i]
+                self.save_bev_visualization(current_robot_pose, 
+                                            object_estimate_trajectories, 
+                                            object_label_trajectories,
+                                            loc_estimates_by_sample, loc_labels_by_sample, # these are just needed for bbox visuals
+                                            current_sample_filepath, 
+                                            matched_ids, fp=bev_out_filepath, tracking_id_colors=track_id_to_color)
                 seq_bev_filepaths.append(bev_out_filepath)
-                prev_sample_filepath = sample_filepath
-                prev_robot_pose = current_robot_pose
             # create gif from all the bevs
             self.save_img_bev_gif(seq_bev_filepaths)
             
@@ -285,9 +303,10 @@ class ObjectLocalizationEvaluator:
         color = color[::-1]
         cv2.rectangle(image, (x, y), (x+w, y+h), color, 6)
     
-    def save_bev_visualization(self, current_robot_pose, prev_robot_pose,
+    def save_bev_visualization(self, current_robot_pose,
+                               object_estimate_trajectories, object_label_trajectories,
                                all_loc_estimates, all_loc_labels,
-                               current_sample_filepath, prev_sample_filepath, matched_ids, fp, 
+                               current_sample_filepath, matched_ids, fp, 
                                include_2d_bbox_estimate_visualization: bool = True,
                                include_3d_bbox_label_visualization: bool = False,
                                tracking_id_colors: Dict[int, Tuple[float, float, float]] = None):
@@ -296,23 +315,16 @@ class ObjectLocalizationEvaluator:
         loc_estimates = all_loc_estimates[current_sample_filepath]
         loc_labels = all_loc_labels[current_sample_filepath]
         
-        prev_loc_estimates = all_loc_estimates[prev_sample_filepath] if prev_sample_filepath else None
-        prev_loc_labels = all_loc_labels[prev_sample_filepath] if prev_sample_filepath else None
         image = cv2.imread(current_sample_filepath)
+        current_sample_idx = int(current_sample_filepath.split('_')[-1].split('.')[0])
 
         corresponding_estimates_and_labels = []
         for tracking_id, loc_estimate in loc_estimates.items():
             if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
-                bev_estimate = loc_estimate.get_bev_location()
-                bev_label = loc_labels[matched_ids[tracking_id]].get_bev_location()
+                bev_estimate = object_estimate_trajectories[tracking_id].get_pose_at_timestep(current_sample_idx)
+                bev_label = object_label_trajectories[matched_ids[tracking_id]].get_pose_at_timestep(current_sample_idx)
                 color = tracking_id_colors[tracking_id]
-                if prev_loc_estimates is not None and tracking_id in prev_loc_estimates and matched_ids[tracking_id] in prev_loc_labels:
-                    prev_bev_estimate = prev_loc_estimates[tracking_id].get_bev_location() if prev_loc_estimates else None
-                    prev_bev_label = prev_loc_labels[matched_ids[tracking_id]].get_bev_location() if prev_loc_labels else None
-                else:
-                    prev_bev_estimate = None
-                    prev_bev_label = None
-                corresponding_estimates_and_labels.append((bev_estimate, bev_label, prev_bev_estimate, prev_bev_label, color))
+                corresponding_estimates_and_labels.append((bev_estimate, bev_label, color))
             
             if include_2d_bbox_estimate_visualization:
                 # visualize the 2d bbox on the image
@@ -331,7 +343,7 @@ class ObjectLocalizationEvaluator:
                 #     loc_estimate.visualize_3d_bbox()
                 
             # let's also plot bevs
-            self.visualize_bev_plot(current_robot_pose, prev_robot_pose, corresponding_estimates_and_labels)
+            self.visualize_bev_plot(current_robot_pose, corresponding_estimates_and_labels)
             
             # save side by side with original image and current plot (use temporary file)
             temp_file = f'{fp}_temp.png'
@@ -350,49 +362,52 @@ class ObjectLocalizationEvaluator:
             
             cv2.imwrite(fp, img)
 
-    def visualize_bev_plot(self, current_robot_pose, prev_robot_pose, corresponding_estimates_and_labels_and_colors):
+    def get_endpoint_diff(self, start, yaw, length):
+        # Calculate the direction vector (dx, dy)
+        dx = np.cos(yaw)
+        dy = np.sin(yaw)
+        
+        # Normalize the direction vector to ensure its Euclidean length is 1
+        norm = np.sqrt(dx**2 + dy**2)
+        dx /= norm
+        dy /= norm
+        
+        return dx, dy
+
+    def visualize_bev_plot(self, current_robot_pose, corresponding_estimates_and_labels_and_colors):
         # each estimate (and its corresponding label) should have a different color
         # now let's plot them
         fig, ax = plt.subplots()
-        for bev_estimate, bev_label, prev_bev_estimate, prev_bev_label, color in corresponding_estimates_and_labels_and_colors:
-            if prev_bev_label is None or prev_bev_estimate is None:
-                ax.plot(bev_estimate[1], bev_estimate[0], '*', color=color, markersize=10)
-                ax.plot(bev_label[1], bev_label[0], 'o', color=color, markersize=8)
-            else:
-                fixed_arrow_length = 1.0
-                ax.plot(bev_estimate[1], bev_estimate[0], '*', color=color, markersize=10)
-                ax.plot(bev_label[1], bev_label[0], 'o', color=color, markersize=8)
-                    
-                # Calculate direction vector for bev_estimate (pointing away from the previous point)
-                vec_estimate = np.array([bev_estimate[1] - prev_bev_estimate[1], bev_estimate[0] - prev_bev_estimate[0]])
-                norm_estimate = np.linalg.norm(vec_estimate)
-                if norm_estimate != 0:
-                    vec_estimate = vec_estimate / norm_estimate * fixed_arrow_length
+        fixed_arrow_length = 0.5
+        for bev_estimate, bev_label, color in corresponding_estimates_and_labels_and_colors:
+            ax.plot(bev_estimate.y, bev_estimate.x, '*', color=color, markersize=10)
+            ax.plot(bev_label.y, bev_label.x, 'o', color=color, markersize=8)
+            
+            if bev_estimate.yaw is not None:
+                bev_estimate_pos = bev_estimate.get_position_np()
+                end_bev_estimate = self.get_endpoint_diff(bev_estimate_pos, bev_estimate.yaw, fixed_arrow_length)
                 
-                # Calculate direction vector for bev_label (pointing away from the previous point)
-                vec_label = np.array([bev_label[1] - prev_bev_label[1], bev_label[0] - prev_bev_label[0]])
-                norm_label = np.linalg.norm(vec_label)
-                if norm_label != 0:
-                    vec_label = vec_label / norm_label * fixed_arrow_length
-
                 # Draw arrow from the current bev_estimate in the flipped direction (away from previous)
-                ax.arrow(bev_estimate[1], bev_estimate[0], vec_estimate[0], vec_estimate[1], 
+                ax.arrow(bev_estimate_pos[1], bev_estimate_pos[0], end_bev_estimate[1], end_bev_estimate[0], 
                         width=0.1, fc=color, ec=color)
+                
+            if bev_label.yaw is not None:
+                bev_label_pos = bev_label.get_position_np()
+                end_bev_label = self.get_endpoint_diff(bev_label_pos, bev_label.yaw, fixed_arrow_length)
 
                 # Draw arrow from the current bev_label in the flipped direction (away from previous)
-                ax.arrow(bev_label[1], bev_label[0], vec_label[0], vec_label[1], 
+                # compute dist between the points
+                # assert np.linalg.norm(np.array(bev_label_pos) - np.array([end_bev_label])) <= fixed_arrow_length, f'bev_label_pos: {bev_label_pos}, end_bev_label_pos: {end_bev_label}'
+                ax.arrow(bev_label_pos[1], bev_label_pos[0], end_bev_label[1], end_bev_label[0], 
                         width=0.1, fc=color, ec=color)
         # also plot the trajectory
-        ax.plot(current_robot_pose[1], current_robot_pose[0], 's', color='black', markersize=5)
-        if prev_robot_pose is not None:
-            fixed_arrow_length = 1.0
-            vec_estimate = np.array([current_robot_pose[1] - prev_robot_pose[1], current_robot_pose[0] - prev_robot_pose[0]])
-            norm_estimate = np.linalg.norm(vec_estimate)
-            if norm_estimate != 0:
-                vec_estimate = vec_estimate / norm_estimate * fixed_arrow_length
-            ax.arrow(current_robot_pose[1], current_robot_pose[0], vec_estimate[0], vec_estimate[1], 
-                    width=0.1, fc='black', ec='black')
+        ax.plot(current_robot_pose.y, current_robot_pose.x, 's', color='black', markersize=5)
+    
+        current_robot_position = current_robot_pose.get_position_np()
+        end_robot_pose = self.get_endpoint_diff(current_robot_position, current_robot_pose.yaw, fixed_arrow_length)
 
+        ax.arrow(current_robot_position[1], current_robot_position[0], end_robot_pose[1], end_robot_pose[0], 
+                width=0.1, fc='black', ec='black')
             
         # expected grid limits
         ax.set_xlim(self.grid_y_min, self.grid_y_max)

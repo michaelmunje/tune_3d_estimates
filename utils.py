@@ -35,11 +35,21 @@ class BEVPose:
 
     # minus
     def __sub__(self, other):
-        return BEVPose(self.x - other.x, self.y - other.y, self.yaw - other.yaw)
+        delta_yaw = self.yaw - other.yaw
+        if delta_yaw > np.pi:
+            delta_yaw -= 2 * np.pi
+        elif delta_yaw < -np.pi:
+            delta_yaw += 2 * np.pi
+        return BEVPose(self.x - other.x, self.y - other.y, delta_yaw)
     
     # plus
     def __add__(self, other):
-        return BEVPose(self.x + other.x, self.y + other.y, self.yaw + other.yaw)
+        delta_yaw = self.yaw + other.yaw
+        if delta_yaw > np.pi:
+            delta_yaw -= 2 * np.pi
+        elif delta_yaw < -np.pi:
+            delta_yaw += 2 * np.pi
+        return BEVPose(self.x + other.x, self.y + other.y, delta_yaw)
 
     def get_position_np(self):
         return np.array([self.x, self.y])
@@ -63,15 +73,14 @@ def get_bev_pose_wrt_initial_pose(bev_pose: BEVPose, bev_reference_pose: BEVPose
     
     bev_position = bev_pose.get_position_np()
     bev_coords = R @ bev_position + (R2 @ T)
-    transformed_yaw = bev_pose.yaw + delta_yaw
+    transformed_yaw = bev_pose.yaw + delta_yaw if bev_pose.yaw is not None else None
 
     assert not np.isnan(bev_coords).any(), f'Nans in bev_coords: {bev_coords}'
-    assert not np.isnan(transformed_yaw), f'Nans in transformed_yaw: {transformed_yaw}'
     
     return BEVPose(bev_coords[0], bev_coords[1], transformed_yaw)
 
 class Trajectory:
-    def __init__(self, bev_poses: List[BEVPose], corresponding_timesteps: List[int], id: str,localize: bool = True):
+    def __init__(self, bev_poses: List[BEVPose], corresponding_timesteps: List[int], id: str, localize: bool):
         self.bev_poses = bev_poses
         if localize:
             initial_position = self.bev_poses[0].get_position_np()
@@ -83,6 +92,7 @@ class Trajectory:
                     initial_yaw
                 )
                 self.bev_poses[i].yaw = self.bev_poses[i].yaw - initial_yaw
+                self.bev_poses[i].yaw = self.bev_poses[i].yaw if self.bev_poses[i].yaw < np.pi else self.bev_poses[i].yaw - 2 * np.pi
 
         assert len(corresponding_timesteps) == len(self.bev_poses), 'Number of timesteps and bev poses do not match'
         self.corresponding_timesteps = corresponding_timesteps
@@ -158,6 +168,10 @@ class Trajectory:
         self.bev_poses = smoothed_poses
 
     def estimate_yaws(self):
+        if len(self.bev_poses) == 1:
+            self.bev_poses[0].yaw = None
+            return
+
         # use the difference between consecutive poses to estimate the yaw
         for i in range(len(self.bev_poses) - 1):
             next_position = self.bev_poses[i + 1].get_position_np()
@@ -168,6 +182,9 @@ class Trajectory:
 
     def __repr__(self):
         return f"Trajectory(poses={self.bev_poses})"
+    
+    def __len__(self):
+        return len(self.bev_poses)
     
 def transform_trajectory_to_initial_pose(traj: Trajectory, reference_frame_traj: Trajectory):
     initial_reference_pose = reference_frame_traj.bev_poses[0]
