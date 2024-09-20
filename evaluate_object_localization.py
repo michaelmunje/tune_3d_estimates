@@ -233,10 +233,16 @@ class ObjectLocalizationEvaluator:
                 assert type(object_estimate_trajectories_seq[i][tracking_id]) == Trajectory, 'Object estimate trajectory must be of type Trajectory'
                 object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
                 transform_trajectory_to_initial_pose(object_estimate_trajectories_seq[i][tracking_id], self.trajectories[i])
+                object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
+                object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
+                object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
             for coda_tracking_id in object_label_trajectories_seq[i]:
                 assert type(object_label_trajectories_seq[i][coda_tracking_id]) == Trajectory, 'Object label trajectory must be of type Trajectory'
                 object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
                 transform_trajectory_to_initial_pose(object_label_trajectories_seq[i][coda_tracking_id], self.trajectories[i])
+                object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
+                # object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
+                # object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
         
         training_id_colors_each_seq = self.get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
             

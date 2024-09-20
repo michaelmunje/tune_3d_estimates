@@ -87,7 +87,7 @@ class Trajectory:
             initial_yaw = self.bev_poses[0].yaw
             for i in range(len(self.bev_poses)):
                 self.bev_poses[i].x, self.bev_poses[i].y = localize_position_wrt_initial_pose(
-                    np.array([self.bev_poses[i].x, self.bev_poses[i].y]), 
+                    self.bev_poses[i].get_position_np(), 
                     initial_position, 
                     initial_yaw
                 )
@@ -104,7 +104,7 @@ class Trajectory:
     def get_pose_at_timestep(self, timestep: int):
         return self.bev_poses[self.corresponding_timesteps.index(timestep)]
 
-    def kalman_smooth(self, speed_guess: float, process_noise: float = 1.0, measurement_noise: float = 1.0):
+    def kalman_smooth(self, speed_guess: float = 0.325, process_noise: float = 1.0, measurement_noise: float = 2.0):
         """
         Smooth the trajectory using a Kalman filter.
         
