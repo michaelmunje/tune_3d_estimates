@@ -158,7 +158,6 @@ class Trajectory:
         new_timestep = self.possible_timesteps[new_timestep_idx]
         self.corresponding_timesteps.insert(target_idx, new_timestep)
 
-        
     def kalman_smooth(self, speed_guess: float = 0.325, process_noise: float = 1.0, measurement_noise: float = 2.0):
         """
         Smooth the trajectory using a Extended Kalman filter.
