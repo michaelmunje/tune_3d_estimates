@@ -234,8 +234,8 @@ class ObjectLocalizationEvaluator:
                 timesteps_before_interpolation = [ts for ts in label_trajectory.corresponding_timesteps]
                 if self.interpolate_between_trajectory:
                     label_trajectory.interpolate_all_missing_poses()
-                if self.smooth_label_trajectories:
-                    label_trajectory.kalman_smooth()
+                #if self.smooth_label_trajectories:
+                #    label_trajectory.kalman_smooth()
                 timesteps_after_interpolation_and_smoothing = label_trajectory.corresponding_timesteps
                 
                 # timesteps that were added
@@ -291,14 +291,14 @@ class ObjectLocalizationEvaluator:
                 object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
                 if self.smooth_estimate_trajectories:
                     object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
-                    object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
+                    #object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
             for coda_tracking_id in object_label_trajectories_seq[i]:
                 assert type(object_label_trajectories_seq[i][coda_tracking_id]) == Trajectory, 'Object label trajectory must be of type Trajectory'
                 transform_trajectory_to_initial_pose(object_label_trajectories_seq[i][coda_tracking_id], self.trajectories[i])
                 object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
                 if self.smooth_label_trajectories:
                     object_label_trajectories_seq[i][coda_tracking_id].kalman_smooth()
-                    object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
+                    #object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
         
         training_id_colors_each_seq = self.get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
             
