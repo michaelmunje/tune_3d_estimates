@@ -71,10 +71,15 @@ class ObjectLocalizationEvaluator:
         self.frame_interval_lengths: int = config["frame_interval_lengths"]
         self.frame_interval_sample_stride: int = config["frame_interval_sample_stride"]
         self.frame_sequences: List[List[int]] = []
+
+        self.smooth_robot_trajectory: bool = config["smooth_robot_trajectory"]
+        self.smooth_estimate_trajectories: bool = config["smooth_estimate_trajectories"]
+        self.interpolate_between_trajectory: bool = config["interpolate_between_trajectory"]
+        self.smooth_label_trajectories: bool = config["smooth_label_trajectories"]
         
         for start_idx in self.frame_intervals_start_indices:
             self.frame_sequences.append(list(range(start_idx, start_idx + self.frame_interval_lengths, self.frame_interval_sample_stride)))
-        
+            
         # check if the filepath exists, if not try 1 lower
         for frame_seq in self.frame_sequences:
             for i, frame_idx in enumerate(frame_seq):
@@ -100,7 +105,10 @@ class ObjectLocalizationEvaluator:
         self.trajectories: List[Trajectory] = []
         for frame_seq in self.frame_sequences:
             bevs = [self.frame_idx_to_bev_pose[frame_idx] for frame_idx in frame_seq]
-            self.trajectories.append(Trajectory(bevs, frame_seq, id='robot', localize=True))
+            trajectory = Trajectory(bevs, frame_seq, frame_seq, id='robot', localize=True)
+            trajectory.kalman_smooth()
+            self.trajectories.append(trajectory)
+            
 
     def frame_idx_to_img_fp(self, frame_idx: int) -> str:
         return f'coda-devkit/data/2d_rect/cam0/{self.traj_idx}/2d_rect_cam0_{self.traj_idx}_{frame_idx}.png'
@@ -153,7 +161,9 @@ class ObjectLocalizationEvaluator:
         # for each sample sequence, create a trajectory
         seq_object_estimate_trajectories: List[Dict[str, Trajectory]] = [] # (for each sample seq), key is track_id, value is trajectory
         
-        for samples in samples_sequences:
+        for seq_idx in range(len(samples_sequences)):
+            samples = samples_sequences[seq_idx]
+            possible_timesteps = self.trajectories[seq_idx].possible_timesteps
             tracking_id_to_bev: Dict[str, List[Tuple[int, BEVPose]]] = {}
             for sample in samples:
                 sample_filepath = sample.rgb_image_filepath
@@ -169,7 +179,30 @@ class ObjectLocalizationEvaluator:
                 indices_and_bev_poses = tracking_id_to_bev[tracking_id]
                 bev_poses = [bev_pose for _, bev_pose in indices_and_bev_poses]
                 indices = [idx for idx, _ in indices_and_bev_poses]
-                trajectory_by_sample_filepath[tracking_id] = Trajectory(bev_poses, indices, id=tracking_id, localize=False)
+                estimate_trajectory = Trajectory(bev_poses, indices, possible_timesteps, id=tracking_id, localize=False)
+                estimate_trajectory.estimate_yaws()
+                
+                timesteps_before_interpolation = [ts for ts in estimate_trajectory.corresponding_timesteps]
+                # timesteps in trajectory
+                if self.interpolate_between_trajectory: 
+                    estimate_trajectory.interpolate_all_missing_poses()
+                if self.smooth_estimate_trajectories:
+                    estimate_trajectory.kalman_smooth()
+                    
+                timesteps_after_interpolation_and_smoothing = estimate_trajectory.corresponding_timesteps
+                
+                # now let's see if we need to add entries to loc_estimates_by_sample
+                # timesteps that were added
+                timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
+                for timestep in timesteps_added:
+                    for sample in samples:
+                        sample_filepath = sample.rgb_image_filepath
+                        sample_idx = sample.get_sample_idx()
+                        if sample_idx == timestep:
+                            loc_estimates_by_sample[sample_filepath][tracking_id] = LocationWith2DBBox(x=-1.0, y=-1.0, w=-1.0, h=-1.0, 
+                                                                                                       cX=-1.0, cY=-1.0, cZ=-1.0, 
+                                                                                                       tracking_id=tracking_id, sample_filepath=sample_filepath)
+                trajectory_by_sample_filepath[tracking_id] = estimate_trajectory
             seq_object_estimate_trajectories.append(trajectory_by_sample_filepath)
         return seq_object_estimate_trajectories
     
@@ -178,7 +211,9 @@ class ObjectLocalizationEvaluator:
         seq_object_label_trajectories: List[Dict[str, Trajectory]] = [] # (for each sample seq), key is track_id, value is trajectory
         matched_ids_inv = {v: k for k, v in matched_ids.items()}
         
-        for samples in samples_sequences:
+        for seq_idx in range(len(samples_sequences)):
+            samples = samples_sequences[seq_idx]
+            possible_timesteps = self.trajectories[seq_idx].possible_timesteps
             tracking_id_to_bev: Dict[str, List[Tuple[int, BEVPose]]] = {}
             for sample in samples:
                 sample_filepath = sample.rgb_image_filepath
@@ -194,7 +229,28 @@ class ObjectLocalizationEvaluator:
                 indices_and_bev_poses = tracking_id_to_bev[tracking_id]
                 bev_poses = [bev_pose for _, bev_pose in indices_and_bev_poses]
                 indices = [idx for idx, _ in indices_and_bev_poses]
-                trajectory_by_sample_filepath[tracking_id] = Trajectory(bev_poses, indices, id=tracking_id, localize=False)
+                label_trajectory = Trajectory(bev_poses, indices, possible_timesteps, id=tracking_id, localize=False)
+                label_trajectory.estimate_yaws()
+                timesteps_before_interpolation = [ts for ts in label_trajectory.corresponding_timesteps]
+                if self.interpolate_between_trajectory:
+                    label_trajectory.interpolate_all_missing_poses()
+                if self.smooth_label_trajectories:
+                    label_trajectory.kalman_smooth()
+                timesteps_after_interpolation_and_smoothing = label_trajectory.corresponding_timesteps
+                
+                # timesteps that were added
+                timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
+                for timestep in timesteps_added:
+                    for sample in samples:
+                        sample_filepath = sample.rgb_image_filepath
+                        sample_idx = sample.get_sample_idx()
+                        if sample_idx == timestep:
+                            loc_labels_by_sample[sample_filepath][tracking_id] = LocationWith3dBBox(cX=0.0, cY=0.0, cZ=0.0, 
+                                                                                                    w = 0.0, h=0.0, l=0.0, 
+                                                                                                    r=0.0, p=0.0, y=0.0,
+                                                                                                    sample_filepath=sample_filepath,
+                                                                                                    tracking_id=tracking_id)
+                trajectory_by_sample_filepath[tracking_id] = label_trajectory
             seq_object_label_trajectories.append(trajectory_by_sample_filepath)
         return seq_object_label_trajectories
 
@@ -231,18 +287,18 @@ class ObjectLocalizationEvaluator:
         for i in range(len(self.trajectories)):
             for tracking_id in object_estimate_trajectories_seq[i]:
                 assert type(object_estimate_trajectories_seq[i][tracking_id]) == Trajectory, 'Object estimate trajectory must be of type Trajectory'
-                object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
                 transform_trajectory_to_initial_pose(object_estimate_trajectories_seq[i][tracking_id], self.trajectories[i])
                 object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
-                object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
-                object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
+                if self.smooth_estimate_trajectories:
+                    object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
+                    object_estimate_trajectories_seq[i][tracking_id].estimate_yaws()
             for coda_tracking_id in object_label_trajectories_seq[i]:
                 assert type(object_label_trajectories_seq[i][coda_tracking_id]) == Trajectory, 'Object label trajectory must be of type Trajectory'
-                object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
                 transform_trajectory_to_initial_pose(object_label_trajectories_seq[i][coda_tracking_id], self.trajectories[i])
                 object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
-                # object_estimate_trajectories_seq[i][tracking_id].kalman_smooth()
-                # object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
+                if self.smooth_label_trajectories:
+                    object_label_trajectories_seq[i][coda_tracking_id].kalman_smooth()
+                    object_label_trajectories_seq[i][coda_tracking_id].estimate_yaws()
         
         training_id_colors_each_seq = self.get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
             
@@ -336,6 +392,8 @@ class ObjectLocalizationEvaluator:
                 # visualize the 2d bbox on the image
                 for tracking_id, loc_estimate in loc_estimates.items():
                     if tracking_id in matched_ids and matched_ids[tracking_id] in loc_labels:
+                        if loc_estimate.w == 0 or loc_estimate.h == 0 or loc_estimate.x == -1 or loc_estimate.y == -1:
+                            continue
                         x, y, w, h = loc_estimate.x, loc_estimate.y, loc_estimate.w, loc_estimate.h
                         x, y = int(x), int(y)
                         w, h = int(w), int(h) 

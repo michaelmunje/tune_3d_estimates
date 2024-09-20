@@ -80,7 +80,9 @@ def get_bev_pose_wrt_initial_pose(bev_pose: BEVPose, bev_reference_pose: BEVPose
     return BEVPose(bev_coords[0], bev_coords[1], transformed_yaw)
 
 class Trajectory:
-    def __init__(self, bev_poses: List[BEVPose], corresponding_timesteps: List[int], id: str, localize: bool):
+    def __init__(self, bev_poses: List[BEVPose], corresponding_timesteps: List[int], possible_timesteps: List[int], id: str, localize: bool):
+        assert len(bev_poses) == len(corresponding_timesteps), 'Number of bev poses and corresponding timesteps do not match'
+        assert len(corresponding_timesteps) <= len(possible_timesteps), 'Number of corresponding timesteps should be less than or equal to possible timesteps'
         self.bev_poses = bev_poses
         if localize:
             initial_position = self.bev_poses[0].get_position_np()
@@ -96,14 +98,67 @@ class Trajectory:
 
         assert len(corresponding_timesteps) == len(self.bev_poses), 'Number of timesteps and bev poses do not match'
         self.corresponding_timesteps = corresponding_timesteps
+        self.possible_timesteps = possible_timesteps
         self.id = id # can be robot, track id, coda id, etc.
 
     def get_timestep(self, idx: int):
         return self.corresponding_timesteps[idx]
     
+    def get_timestep_idx(self, timestep: int):
+        assert timestep in self.corresponding_timesteps, f'Timestep {timestep} not found in corresponding timesteps'
+        return self.corresponding_timesteps.index(timestep)
+    
     def get_pose_at_timestep(self, timestep: int):
-        return self.bev_poses[self.corresponding_timesteps.index(timestep)]
+        return self.bev_poses[self.get_timestep_idx(timestep)]
+    
+    def get_discontinuities(self) -> List[Tuple[int, int]]:
+        # only care about them between first seen timestep and last seen timestep
+        discontinuities: List[Tuple[int, int]] = []
+        prev_timestep = self.corresponding_timesteps[0]
+        for i in range(1, len(self.corresponding_timesteps)):
+            next_timestep = self.corresponding_timesteps[i]
+            prev_timestep_idx = self.possible_timesteps.index(prev_timestep)
+            next_timestep_idx = self.possible_timesteps.index(next_timestep)
+            if next_timestep_idx - prev_timestep_idx > 1:
+                discontinuities.append((prev_timestep, next_timestep))
+            prev_timestep = next_timestep
+        return discontinuities
+    
+    def has_discontinuities(self) -> bool:
+        return len(self.get_discontinuities()) > 0
+    
+    def interpolate_all_missing_poses(self):
+        while self.has_discontinuities():
+            discontinuities = self.get_discontinuities()
+            # get first discontinuity
+            prev_filled_timestep, next_filled_timestep = discontinuities[0]
+            self.interpolate_missing_pose(prev_filled_timestep, next_filled_timestep)
+    
+    def interpolate_missing_pose(self, prev_timestep: int, next_timestep: int):
+        prev_idx = self.get_timestep_idx(prev_timestep)
+        target_idx = prev_idx + 1
+        
+        assert next_timestep - prev_timestep > 1, 'Two consecutive timesteps should have at least 1 frame gap'
 
+        next_pose = self.get_pose_at_timestep(next_timestep)
+        prev_pose = self.get_pose_at_timestep(prev_timestep)
+        self.bev_poses.insert(target_idx, BEVPose(
+            (next_pose.x + prev_pose.x) / 2,
+            (next_pose.y + prev_pose.y) / 2,
+            (next_pose.yaw + prev_pose.yaw) / 2
+        ))
+        # correct yaw to make sure valid range
+        self.bev_poses[target_idx].yaw = self.bev_poses[target_idx].yaw if self.bev_poses[target_idx].yaw < np.pi else self.bev_poses[target_idx].yaw - 2 * np.pi
+        
+        # interpolate in the middle (or close to the middle) of the two timesteps
+        # find middle timestep from possible timesteps
+        next_timestep_idx = self.possible_timesteps.index(next_timestep)
+        prev_timestep_idx = self.possible_timesteps.index(prev_timestep)
+        new_timestep_idx = (next_timestep_idx + prev_timestep_idx) // 2
+        new_timestep = self.possible_timesteps[new_timestep_idx]
+        self.corresponding_timesteps.insert(target_idx, new_timestep)
+
+        
     def kalman_smooth(self, speed_guess: float = 0.325, process_noise: float = 1.0, measurement_noise: float = 2.0):
         """
         Smooth the trajectory using a Kalman filter.
