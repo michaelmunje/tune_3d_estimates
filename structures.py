@@ -162,70 +162,94 @@ class Trajectory:
         new_timestep_idx = (next_timestep_idx + prev_timestep_idx) // 2
         new_timestep = self.possible_timesteps[new_timestep_idx]
         self.corresponding_timesteps.insert(target_idx, new_timestep)
-        
-    def kalman_smooth(self, speed_guess: float = 0.325, process_noise: float = 1.0, measurement_noise: float = 2.0):
-        """
-        Smooth the trajectory using a Kalman filter.
-        
-        Parameters:
-        - speed_guess: A rough guess of the speed between poses.
-        - process_noise: The process noise covariance, representing how much uncertainty there is in the dynamics.
-        - measurement_noise: The measurement noise covariance, representing how noisy the position measurements are.
-        
-        Returns:
-        - A new Trajectory object with smoothed BEVPose positions.
-        """
+            
+    def kalman_smooth(self, speed_guess: float = 0.325, process_noise: List[float] = [1.0], measurement_noise: List[float] = [1.0]):
+        if len(self.bev_poses) == 1:
+            return
         # Initialize state vector: [x, y, vx, vy]
         n = len(self.bev_poses)
-        smoothed_poses = []
-
         # State [x, y, vx, vy] (positions and velocities)
-        state = np.array([self.bev_poses[0].x, self.bev_poses[0].y, speed_guess, speed_guess])
+        state = np.array([self.bev_poses[0].x, self.bev_poses[0].y, self.bev_poses[0].yaw, speed_guess])
         
         # State covariance matrix
         state_cov = np.eye(4)
-
-        # Process model matrix (position updates with velocity)
-        A = np.array([[1, 0, 1, 0],  # x' = x + vx
-                      [0, 1, 0, 1],  # y' = y + vy
-                      [0, 0, 1, 0],  # vx' = vx
-                      [0, 0, 0, 1]]) # vy' = vy
-
-        # Process noise (assuming noise in the velocity component)
-        Q = process_noise * np.eye(4)
-
+        # Process noise
+        if len(process_noise) == 1:
+            Q = process_noise[0] * np.eye(4)
+        elif len(process_noise) == 4:
+            Q = np.diag(process_noise)
+        else:
+            raise ValueError("process_noise must be a list of either 1 or 4 elements")
         # Measurement matrix (we measure x and y positions only)
         H = np.array([[1, 0, 0, 0],  # we measure x
-                      [0, 1, 0, 0]]) # we measure y
-
+                        [0, 1, 0, 0]]) # we measure y
+        
         # Measurement noise covariance matrix
-        R = measurement_noise * np.eye(2)
-
+        if len(measurement_noise) == 1:
+            R = measurement_noise[0] * np.eye(2)
+        elif len(measurement_noise) == 2:
+            R = np.diag(measurement_noise)
+        else:
+            raise ValueError("process_noise must be a list of either 1 or 2 elements")
         # Identity matrix for updating
         I = np.eye(4)
-
+        # Time step (assuming constant time step between poses)
+        dt = 0.25  # You may need to adjust this based on your data
+        # Forward pass (Kalman filter)
+        forward_states = []
+        forward_covs = []
         for i in range(n):
             # Get the current measurement (position)
             z = np.array([self.bev_poses[i].x, self.bev_poses[i].y])
-
-            # Prediction step
-            state = A @ state  # state prediction
-            state_cov = A @ state_cov @ A.T + Q  # covariance prediction
-
+            # Prediction step (non-linear)
+            x, y, yaw, v = state
+            state_pred = np.array([
+                x + v * np.cos(yaw) * dt,
+                y + v * np.sin(yaw) * dt,
+                yaw,
+                v
+            ])
+            # Jacobian of the state transition function
+            F = np.array([
+                [1, 0, -v * np.sin(yaw) * dt, np.cos(yaw) * dt],
+                [0, 1,  v * np.cos(yaw) * dt, np.sin(yaw) * dt],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
+            # Covariance prediction
+            state_cov = F @ state_cov @ F.T + Q
             # Kalman gain calculation
             S = H @ state_cov @ H.T + R  # residual covariance
             K = state_cov @ H.T @ np.linalg.inv(S)  # Kalman gain
-
             # Update step
-            y = z - H @ state  # measurement residual
-            state = state + K @ y  # state update
+            y = z - H @ state_pred  # measurement residual
+            state = state_pred + K @ y  # state update
             state_cov = (I - K @ H) @ state_cov  # covariance update
-
-            # Store the smoothed BEVPose
-            smoothed_poses.append(BEVPose(state[0], state[1], self.bev_poses[i].yaw))
-
-        self.bev_poses = smoothed_poses
-
+            forward_states.append(state)
+            forward_covs.append(state_cov)
+        # Backward pass (RTS smoother)
+        smoothed_states = [forward_states[-1]]
+        smoothed_covs = [forward_covs[-1]]
+        
+        for i in range(n - 2, -1, -1):
+            x, y, yaw, v = forward_states[i]
+            F = np.array([
+                [1, 0, -v * np.sin(yaw) * dt, np.cos(yaw) * dt],
+                [0, 1,  v * np.cos(yaw) * dt, np.sin(yaw) * dt],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
+            
+            P_pred = F @ forward_covs[i] @ F.T + Q
+            C = forward_covs[i] @ F.T @ np.linalg.inv(P_pred)
+            
+            smoothed_state = forward_states[i] + C @ (smoothed_states[0] - F @ forward_states[i])
+            smoothed_cov = forward_covs[i] + C @ (smoothed_covs[0] - P_pred) @ C.T
+            
+            smoothed_states.insert(0, smoothed_state)
+            smoothed_covs.insert(0, smoothed_cov)
+        self.bev_poses = [BEVPose(state[0], state[1], state[2]) for state in smoothed_states]
+            
     def estimate_yaws(self):
         if len(self.bev_poses) == 1:
             self.bev_poses[0].yaw = None

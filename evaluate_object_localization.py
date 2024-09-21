@@ -8,7 +8,7 @@ from typing import List, Dict
 import bbox_and_bev_estimation
 import bbox_matching 
 from structures import Sample, quaternion_to_yaw, transform_trajectory_to_initial_pose
-from metrics import average_displacement_error, final_displacement_error, angular_displacement_error, heading_deviation_error
+from metrics import average_displacement_error, final_displacement_error, angular_displacement_error, heading_deviation_error, trajectory_abs_angle_diff
 from structures import BEVPose, Trajectory
 from visualize import save_img_bev_gif
 from data_loader import load_samples, get_estimates_and_labels_per_sample, get_object_estimate_trajectories, get_object_label_trajectories, get_track_id_colors, update_estimates_with_new_timesteps, update_labels_with_new_timesteps
@@ -137,15 +137,15 @@ class ObjectLocalizationEvaluator:
                     estimate_trajectory.interpolate_all_missing_poses()
                 if self.smooth_estimate_trajectories:
                     estimate_trajectory.kalman_smooth()
-                    estimate_trajectory.estimate_yaws()
+                    # estimate_trajectory.estimate_yaws()
                     
                 timesteps_after_interpolation_and_smoothing = estimate_trajectory.corresponding_timesteps
                 timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
                 update_estimates_with_new_timesteps(timesteps_added, samples, loc_estimates_by_sample, tracking_id)
                 
-                if self.smooth_estimate_trajectories:
-                    estimate_trajectory.kalman_smooth()
-                    estimate_trajectory.estimate_yaws()
+                # if self.smooth_estimate_trajectories:
+                #     estimate_trajectory.kalman_smooth()
+                #     # estimate_trajectory.estimate_yaws()
 
             for coda_tracking_id in object_label_trajectories_seq[i]:
                 label_trajectory = object_label_trajectories_seq[i][coda_tracking_id]
@@ -159,16 +159,16 @@ class ObjectLocalizationEvaluator:
                     
                 if self.smooth_label_trajectories:
                     label_trajectory.kalman_smooth()
-                    label_trajectory.estimate_yaws()
+                    # label_trajectory.estimate_yaws()
 
                 timesteps_after_interpolation_and_smoothing = label_trajectory.corresponding_timesteps
                 # timesteps that were added
                 timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
                 update_labels_with_new_timesteps(timesteps_added, samples, loc_labels_by_sample, coda_tracking_id)
                 
-                if self.smooth_label_trajectories:
-                    label_trajectory.kalman_smooth()
-                    label_trajectory.estimate_yaws()
+                # if self.smooth_label_trajectories:
+                #     label_trajectory.kalman_smooth()
+                #     label_trajectory.estimate_yaws()
         
         training_id_colors_each_seq = get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
             
@@ -183,6 +183,8 @@ class ObjectLocalizationEvaluator:
         final_displacement_errors = 0.0
         angular_displacement_errors = 0.0
         heading_deviation_errors = 0.0
+        avg_angular_traj_change_estimates = 0.0
+        avg_angular_traj_change_labels = 0.0
         n_trajs = 0
         
         for seq_idx in range(len(samples_sequences)):
@@ -201,6 +203,8 @@ class ObjectLocalizationEvaluator:
                 final_displacement_errors += final_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
                 angular_displacement_errors += angular_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
                 heading_deviation_errors += heading_deviation_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
+                avg_angular_traj_change_estimates += trajectory_abs_angle_diff(object_estimate_trajectories[tracking_id])
+                avg_angular_traj_change_labels += trajectory_abs_angle_diff(object_label_trajectories[coda_tracking_id])
                 n_trajs += 1
             
             # visuals
@@ -229,12 +233,15 @@ class ObjectLocalizationEvaluator:
         angular_displacement_errors /= n_trajs
         heading_deviation_errors /= n_trajs
         print(f'Average Displacement Errors: {average_displacement_errors}, Final Displacement Errors: {final_displacement_errors}, Angular Displacement Errors: {angular_displacement_errors}, Heading Deviation Errors: {heading_deviation_errors}')
+        print(f'Average Angular Trajectory Change Estimates: {avg_angular_traj_change_estimates / n_trajs}, Average Angular Trajectory Change Labels: {avg_angular_traj_change_labels / n_trajs}')
         # let's save metrics to a file and the relevant params used
         with open(f'{self.sample_save_folder}/metrics.txt', 'w') as file:
             file.write(f'Average Average Displacement Errors: {average_displacement_errors}\n')
             file.write(f'Average Final Displacement Errors: {final_displacement_errors}\n')
             file.write(f'Average Angular Displacement Errors: {angular_displacement_errors}\n')
             file.write(f'Average Heading Deviation Errors: {heading_deviation_errors}\n')
+            file.write(f'Average Angular Trajectory Change Estimates: {avg_angular_traj_change_estimates / n_trajs}\n')
+            file.write(f'Average Angular Trajectory Change Labels: {avg_angular_traj_change_labels / n_trajs}\n')
             file.write(f'Interpolate between trajectories: {self.interpolate_between_trajectory}\n')
             file.write(f'Smooth estimate trajectories: {self.smooth_estimate_trajectories}\n')
             file.write(f'Smooth label trajectories: {self.smooth_label_trajectories}\n')

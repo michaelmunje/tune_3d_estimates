@@ -43,7 +43,7 @@ input_width: 1224
 input_height: 1024
 
 smooth_robot_trajectory: false
-smooth_estimate_trajectories: false
+smooth_estimate_trajectories: true
 interpolate_between_trajectory: true
 smooth_label_trajectories: false
 
