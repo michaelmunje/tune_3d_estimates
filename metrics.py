@@ -28,6 +28,16 @@ def compute_bbox_errors(bbox2d_list: List[LocationWith2DBBox],
 
     return errors_2d
 
+# total amount of change in the trajectory
+def trajectory_abs_angle_diff(traj: Trajectory) -> float:
+    if len(traj) == 0:
+        return 0.0
+    
+    total = 0.0
+    for i in range(1, len(traj.bev_poses)):
+        total += np.abs(traj.bev_poses[i].yaw - traj.bev_poses[i-1].yaw)
+    return total
+
 def average_displacement_error(traj: Trajectory, reference_frame_traj: Trajectory) -> float:
     # check each corresponding timestep
     total_error = 0.0
