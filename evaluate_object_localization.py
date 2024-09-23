@@ -10,7 +10,7 @@ import bbox_and_bev_estimation
 import bbox_matching 
 from structures import Sample, quaternion_to_yaw, transform_trajectory_to_initial_pose
 from metrics import average_displacement_error, final_displacement_error, angular_displacement_error, heading_deviation_error, trajectory_abs_angle_diff
-from structures import BEVPose, Trajectory
+from structures import BEVPose, Trajectory, test_trajectory_transforms
 from visualize import save_img_bev_gif
 from data_loader import load_samples, get_estimates_and_labels_per_sample, get_object_estimate_trajectories, get_object_label_trajectories, get_track_id_colors, update_estimates_with_new_timesteps, update_labels_with_new_timesteps
 from visualize import save_bev_visualization
@@ -365,6 +365,8 @@ if __name__ == '__main__':
     args.add_argument('--ekf_tune', action='store_true', help='Enable EKF tuning mode.')
     config_filepath = args.parse_args().config
     debug = args.parse_args().debug
+    
+    test_trajectory_transforms()
 
     evaluator = ObjectLocalizationEvaluator(config_filepath, debug)
     

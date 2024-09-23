@@ -63,12 +63,12 @@ frame_intervals_start_indices: [900, 1000, 1100]
 
 
 # for creating visuals -- suggested values for deployment
-ekf_x_noise: 4.0
+ekf_x_noise: 1.5
 ekf_y_noise: 3.0
 ekf_yaw_noise: 0.3
-ekf_speed_noise: 0.03
-ekf_x_measurement_noise: 5.7
-ekf_y_measurement_noise: 3.3
+ekf_speed_noise: 0.02
+ekf_x_measurement_noise: 5.0
+ekf_y_measurement_noise: 3.0
 
 # for tuning
 random_seed: 42
