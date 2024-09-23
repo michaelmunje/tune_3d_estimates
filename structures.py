@@ -10,21 +10,13 @@ import math
 def yaw_rotmat(yaw: float) -> np.ndarray:
     return np.array(
         [
-            [np.cos(yaw), -np.sin(yaw), 0.0],
-            [np.sin(yaw), np.cos(yaw), 0.0],
-            [0.0, 0.0, 1.0],
+            [np.cos(yaw), -np.sin(yaw)],
+            [np.sin(yaw), np.cos(yaw)]
         ],
     )
         
 def localize_position_wrt_initial_pose(future_position, initial_position, initial_yaw):
     rotmat = yaw_rotmat(initial_yaw)
-    if future_position.shape[-1] == 2:
-        rotmat = rotmat[:2, :2]
-    elif future_position.shape[-1] == 3:
-        pass
-    else:
-        raise ValueError
-
     return (future_position - initial_position).dot(rotmat)
 
 class BEVPose:
@@ -89,6 +81,8 @@ class Trajectory:
         if localize:
             initial_position = self.bev_poses[0].get_position_np()
             initial_yaw = self.bev_poses[0].yaw
+            initial_pose = BEVPose(initial_position[0], initial_position[1], initial_yaw)
+            
             for i in range(len(self.bev_poses)):
                 self.bev_poses[i].x, self.bev_poses[i].y = localize_position_wrt_initial_pose(
                     self.bev_poses[i].get_position_np(), 
@@ -295,6 +289,102 @@ def transform_trajectory_to_initial_pose(traj: Trajectory, reference_frame_traj:
             initial_reference_pose
         )
 
+def test_trajectory_transforms():
+    robot_bev_poses = [
+            BEVPose(0, 0, 0),
+            BEVPose(1, 0, 0),
+            BEVPose(2, 0, 0),
+            BEVPose(3, -1, -np.pi / 4),
+            BEVPose(4, 2, np.pi / 2)
+        ]
+    timesteps = [0, 1, 2, 3, 4]
+    robot_trajectory = Trajectory(
+        bev_poses=robot_bev_poses,
+        corresponding_timesteps=timesteps,
+        possible_timesteps=timesteps,
+        id='robot',
+        localize=True,
+        initial_yaw_estimation=False
+    )
+    # make sure bev poses are the same 
+    same_bev_poses = True
+    for i in range(len(robot_trajectory.bev_poses)):
+        if robot_trajectory.bev_poses[i].x != robot_bev_poses[i].x or \
+           robot_trajectory.bev_poses[i].y != robot_bev_poses[i].y or \
+           robot_trajectory.bev_poses[i].yaw != robot_bev_poses[i].yaw:
+            same_bev_poses = False
+            break
+    assert same_bev_poses, 'Bev poses are not the same'
+
+    relative_poses = [
+        BEVPose(0, 1, 0),
+        BEVPose(0, 1, np.pi),
+        BEVPose(-2, -2, -np.pi),
+        BEVPose(5, 0, np.pi),
+        BEVPose(1, -1, np.pi / 2)
+    ]
+    
+    expected_adjusted_poses = [
+        BEVPose(0, 1, 0),
+        BEVPose(1, 1, np.pi),
+        BEVPose(0, -2, -np.pi),
+        BEVPose(3 + 5 * np.sin(np.pi / 4), -1 - 5 * np.cos(np.pi / 4), 3 * np.pi / 4),
+        BEVPose(5, 3, np.pi)
+    ]
+    
+    trajectory = Trajectory(
+        bev_poses=relative_poses,
+        corresponding_timesteps=timesteps,
+        possible_timesteps=timesteps,
+        id='robot',
+        localize=False,
+        initial_yaw_estimation=False
+    )
+    
+    transform_trajectory_to_initial_pose(trajectory, robot_trajectory)
+    
+    for i in range(len(trajectory.bev_poses)):
+        if trajectory.bev_poses[i].x != expected_adjusted_poses[i].x or \
+           trajectory.bev_poses[i].y != expected_adjusted_poses[i].y or \
+           trajectory.bev_poses[i].yaw != expected_adjusted_poses[i].yaw:
+            same_bev_poses = False  
+            break
+    assert same_bev_poses, f'Bev poses are not the same at timestep {i}: {trajectory.bev_poses[i]} != {expected_adjusted_poses[i]}'
+    
+    # also make sure we can add offsets initial trajectory and it should be same since we localize
+    original_robot_bev_poses = [BEVPose(pose.x, pose.y, pose.yaw) for pose in robot_trajectory.bev_poses]
+    
+    offset_x = 5
+    offset_y = 3
+    new_bev_poses = []
+    for i in range(len(original_robot_bev_poses)):
+        new_x = original_robot_bev_poses[i].x + offset_x
+        new_y = original_robot_bev_poses[i].y + offset_y
+        new_yaw = original_robot_bev_poses[i].yaw
+        new_bev_poses.append(BEVPose(
+            new_x,
+            new_y,
+            new_yaw
+        ))
+    new_trajectory = Trajectory(
+        bev_poses=new_bev_poses,
+        corresponding_timesteps=timesteps,
+        possible_timesteps=timesteps,
+        id='robot',
+        localize=True,
+        initial_yaw_estimation=False
+    )
+
+    same_bev_poses = True
+    for i in range(len(new_trajectory.bev_poses)):
+        if new_trajectory.bev_poses[i].x != original_robot_bev_poses[i].x or \
+           new_trajectory.bev_poses[i].y != original_robot_bev_poses[i].y or \
+           new_trajectory.bev_poses[i].yaw != original_robot_bev_poses[i].yaw:
+            same_bev_poses = False
+            break
+    assert same_bev_poses, f'Bev poses are not the same at timestep {i}: {new_trajectory.bev_poses[i]} != {original_robot_bev_poses[i]}'
+    
+    
 class LocationWith2DBBox:
     def __init__(self, x: float, y: float, w: float, h: float,
                  cX: float, cY: float, cZ: float,
