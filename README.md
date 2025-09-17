@@ -54,7 +54,7 @@ The pipeline expects **images**, **2D bboxes** (LART), and **(optionally) CODa�
 
 - **Images & labels**  
   - Images: accessible via deterministic paths (frame index → image file).  
-  - 2D bboxes (LART): a per‑sample pickle/JSON mapping `tracking_id → bbox2d`.
+  - 2D bboxes (LART): a per‑sample pickle/JSON mapping `tracking_id → bbox2d`. Note: To generate these trackings, please see `https://github.com/michaelmunje/LART/blob/main/run_lart.py` for generating these files.
   - If you have a CODa devkit, keep it under `coda-devkit/` or update paths in `tuning_cfg.yaml`.  
   - For manual id correspondences during evaluation, `tuning_cfg.yaml` references:
     ```yaml
