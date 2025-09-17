@@ -16,6 +16,16 @@ from data_loader import load_samples, get_estimates_and_labels_per_sample, get_o
 from visualize import save_bev_visualization
 sys.path.append(os.getcwd())
 
+def _mean_sem(values):
+    import numpy as np
+    arr = np.asarray(values, dtype=float)
+    n = arr.size
+    if n == 0:
+        return float("nan"), float("nan"), 0
+    mean = float(np.mean(arr))
+    sem = float(np.std(arr, ddof=1) / np.sqrt(n)) if n > 1 else 0.0
+    return mean, sem, n
+
 
 class ObjectLocalizationEvaluator:
     def __init__(self, config_filepath: str, debug_mode: bool = False):
@@ -137,22 +147,30 @@ class ObjectLocalizationEvaluator:
     
     def frame_idx_to_json_fp(self, frame_idx: int) -> str:
         return f'coda-devkit/data/3d_bbox/os1/{self.traj_idx}/3d_bbox_os1_{self.traj_idx}_{frame_idx}.json'
-    
-    def evaluate_sequences(self):
-        samples_sequences: List[List[Sample]] = load_samples(self.frame_sequences, 
-                                                             self.frame_idx_to_img_fp, 
-                                                             self.frame_idx_to_json_fp, 
-                                                             self.lart_folder)
-        loc_estimates_by_sample, loc_labels_by_sample, matched_ids = get_estimates_and_labels_per_sample(samples_sequences, 
-                                                                                                         self.bbox_and_bev_estimation.estimate, 
-                                                                                                         self.bbox_matching.matching)
-        object_estimate_trajectories_seq = get_object_estimate_trajectories(samples_sequences, loc_estimates_by_sample, matched_ids, self.robot_trajectories)
-        object_label_trajectories_seq = get_object_label_trajectories(samples_sequences, loc_labels_by_sample, matched_ids, self.robot_trajectories)
         
+    def evaluate_sequences(self):
+        samples_sequences: List[List[Sample]] = load_samples(
+            self.frame_sequences,
+            self.frame_idx_to_img_fp,
+            self.frame_idx_to_json_fp,
+            self.lart_folder
+        )
+        loc_estimates_by_sample, loc_labels_by_sample, matched_ids = get_estimates_and_labels_per_sample(
+            samples_sequences,
+            self.bbox_and_bev_estimation.estimate,
+            self.bbox_matching.matching
+        )
+        object_estimate_trajectories_seq = get_object_estimate_trajectories(
+            samples_sequences, loc_estimates_by_sample, matched_ids, self.robot_trajectories
+        )
+        object_label_trajectories_seq = get_object_label_trajectories(
+            samples_sequences, loc_labels_by_sample, matched_ids, self.robot_trajectories
+        )
+
         assert len(object_estimate_trajectories_seq) == len(object_label_trajectories_seq), 'Number of estimate and label trajectories do not match'
         assert len(samples_sequences) == len(object_estimate_trajectories_seq), 'Number of sequences and trajectories do not match'
         assert len(object_estimate_trajectories_seq) == len(self.robot_trajectories), 'Number of sequences and trajectories do not match'
-        
+
         for i in range(len(self.robot_trajectories)):
             samples = samples_sequences[i]
             robot_trajectory = self.robot_trajectories[i]
@@ -161,88 +179,78 @@ class ObjectLocalizationEvaluator:
                 assert type(estimate_trajectory) == Trajectory, 'Object estimate trajectory must be of type Trajectory'
                 transform_trajectory_to_initial_pose(estimate_trajectory, robot_trajectory)
                 estimate_trajectory.estimate_yaws()
-                
+
                 timesteps_before_interpolation = [ts for ts in estimate_trajectory.corresponding_timesteps]
                 if self.interpolate_between_trajectory:
                     estimate_trajectory.interpolate_all_missing_poses()
                 if self.smooth_estimate_trajectories:
                     estimate_trajectory.kalman_smooth(process_noise=self.ekf_noise, measurement_noise=self.ekf_measurement_noise)
-                    # estimate_trajectory.estimate_yaws()
-                    
-                timesteps_after_interpolation_and_smoothing = estimate_trajectory.corresponding_timesteps
-                timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
+                    estimate_trajectory.estimate_yaws()
+
+                timesteps_after = estimate_trajectory.corresponding_timesteps
+                timesteps_added = [ts for ts in timesteps_after if ts not in timesteps_before_interpolation]
                 update_estimates_with_new_timesteps(timesteps_added, samples, loc_estimates_by_sample, tracking_id)
-                
-                # if self.smooth_estimate_trajectories:
-                #     estimate_trajectory.kalman_smooth()
-                #     # estimate_trajectory.estimate_yaws()
 
             for coda_tracking_id in object_label_trajectories_seq[i]:
                 label_trajectory = object_label_trajectories_seq[i][coda_tracking_id]
                 assert type(label_trajectory) == Trajectory, 'Object label trajectory must be of type Trajectory'
                 transform_trajectory_to_initial_pose(label_trajectory, robot_trajectory)
                 label_trajectory.estimate_yaws()
-                
+
                 timesteps_before_interpolation = [ts for ts in label_trajectory.corresponding_timesteps]
                 if self.interpolate_between_trajectory:
                     label_trajectory.interpolate_all_missing_poses()
-                    
                 if self.smooth_label_trajectories:
                     label_trajectory.kalman_smooth(process_noise=self.ekf_noise, measurement_noise=self.ekf_measurement_noise)
-                    # label_trajectory.estimate_yaws()
 
-                timesteps_after_interpolation_and_smoothing = label_trajectory.corresponding_timesteps
-                # timesteps that were added
-                timesteps_added = [ts for ts in timesteps_after_interpolation_and_smoothing if ts not in timesteps_before_interpolation]
+                timesteps_after = label_trajectory.corresponding_timesteps
+                timesteps_added = [ts for ts in timesteps_after if ts not in timesteps_before_interpolation]
                 update_labels_with_new_timesteps(timesteps_added, samples, loc_labels_by_sample, coda_tracking_id)
-                
-                # if self.smooth_label_trajectories:
-                #     label_trajectory.kalman_smooth()
-                #     label_trajectory.estimate_yaws()
-        
+
         training_id_colors_each_seq = get_track_id_colors(samples_sequences, loc_estimates_by_sample, matched_ids)
-            
         assert len(training_id_colors_each_seq) == len(samples_sequences), 'Number of sequences and colors do not match'
         assert len(self.robot_trajectories) == len(samples_sequences), 'Number of sequences and trajectories do not match'
-        
         assert isinstance(object_estimate_trajectories_seq, list), 'Object estimate trajectories must be a list'
         assert isinstance(object_label_trajectories_seq, list), 'Object label trajectories must be a list'
-        
-        # compute metrics
-        average_displacement_errors = 0.0
-        final_displacement_errors = 0.0
-        angular_displacement_errors = 0.0
-        heading_deviation_errors = 0.0
-        avg_angular_traj_change_estimates = 0.0
-        avg_angular_traj_change_labels = 0.0
+
+        # --- Collect per-trajectory metrics (for SEM) ---
+        ade_vals = []
+        fde_vals = []
+        ang_disp_vals = []
+        heading_dev_vals = []
+        ang_traj_change_est_vals = []
+        ang_traj_change_lbl_vals = []
+
         n_trajs = 0
-        
+
         for seq_idx in range(len(samples_sequences)):
             samples = samples_sequences[seq_idx]
             robot_trajectory = self.robot_trajectories[seq_idx]
             object_estimate_trajectories = object_estimate_trajectories_seq[seq_idx]
             object_label_trajectories = object_label_trajectories_seq[seq_idx]
             assert len(samples) == len(robot_trajectory), 'Number of samples and robot_trajectory do not match'
-            
+
             for tracking_id in object_estimate_trajectories:
                 coda_tracking_id = matched_ids[tracking_id]
-                # if len == 1, skip
                 if len(object_estimate_trajectories[tracking_id]) == 1:
                     continue
-                average_displacement_errors += average_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
-                final_displacement_errors += final_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
-                angular_displacement_errors += angular_displacement_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
-                heading_deviation_errors += heading_deviation_error(object_estimate_trajectories[tracking_id], object_label_trajectories[coda_tracking_id])
-                avg_angular_traj_change_estimates += trajectory_abs_angle_diff(object_estimate_trajectories[tracking_id])
-                avg_angular_traj_change_labels += trajectory_abs_angle_diff(object_label_trajectories[coda_tracking_id])
+
+                est_traj = object_estimate_trajectories[tracking_id]
+                lbl_traj = object_label_trajectories[coda_tracking_id]
+
+                ade_vals.append(average_displacement_error(est_traj, lbl_traj))
+                fde_vals.append(final_displacement_error(est_traj, lbl_traj))
+                ang_disp_vals.append(angular_displacement_error(est_traj, lbl_traj))
+                heading_dev_vals.append(heading_deviation_error(est_traj, lbl_traj))
+                ang_traj_change_est_vals.append(trajectory_abs_angle_diff(est_traj))
+                ang_traj_change_lbl_vals.append(trajectory_abs_angle_diff(lbl_traj))
                 n_trajs += 1
-            
+
             if not self.save_visualiations:
                 continue
-            
-            # visuals
-            track_id_to_color = training_id_colors_each_seq[seq_idx]
 
+            # Visuals
+            track_id_to_color = training_id_colors_each_seq[seq_idx]
             seq_bev_filepaths = []
             for i in range(len(samples)):
                 sample_filepath = samples[i].rgb_image_filepath
@@ -251,54 +259,71 @@ class ObjectLocalizationEvaluator:
                     os.makedirs(f'{self.sample_save_folder}/individual_BEVs')
                 current_sample_filepath = sample_filepath
                 current_robot_pose = robot_trajectory.bev_poses[i]
-                save_bev_visualization(current_robot_pose, 
-                                            object_estimate_trajectories, 
-                                            object_label_trajectories,
-                                            loc_estimates_by_sample, loc_labels_by_sample, # these are just needed for bbox visuals
-                                            current_sample_filepath, 
-                                            matched_ids, fp=bev_out_filepath, tracking_id_colors=track_id_to_color,
-                                            grid_x_min=self.grid_x_min, grid_x_max=self.grid_x_max, grid_y_min=self.grid_y_min, grid_y_max=self.grid_y_max,
-                                            estimator_name=self.bbox_and_bev_estimation.__class__.__name__)
+                save_bev_visualization(
+                    current_robot_pose,
+                    object_estimate_trajectories,
+                    object_label_trajectories,
+                    loc_estimates_by_sample, loc_labels_by_sample,
+                    current_sample_filepath,
+                    matched_ids, fp=bev_out_filepath, tracking_id_colors=track_id_to_color,
+                    grid_x_min=self.grid_x_min, grid_x_max=self.grid_x_max, grid_y_min=self.grid_y_min, grid_y_max=self.grid_y_max,
+                    estimator_name=self.bbox_and_bev_estimation.__class__.__name__
+                )
                 seq_bev_filepaths.append(bev_out_filepath)
-            # create gif from all the bevs
             save_img_bev_gif(seq_bev_filepaths, self.sample_save_folder)
-    
-        average_displacement_errors /= n_trajs
-        final_displacement_errors /= n_trajs
-        angular_displacement_errors /= n_trajs
-        heading_deviation_errors /= n_trajs
-        avg_angular_traj_change_estimates /= n_trajs
-        avg_angular_traj_change_labels /= n_trajs
-        print(f'Average Displacement Errors: {average_displacement_errors}')
-        print(f'Angular Displacement Errors: {angular_displacement_errors}')
-        print(f'Average Angular Trajectory Change Estimates: {avg_angular_traj_change_estimates}')
-        # let's save metrics to a file and the relevant params used
+
+        # --- Compute mean and SEM for each metric ---
+        ade_mean, ade_sem, _ = _mean_sem(ade_vals)
+        fde_mean, fde_sem, _ = _mean_sem(fde_vals)
+        ang_disp_mean, ang_disp_sem, _ = _mean_sem(ang_disp_vals)
+        heading_dev_mean, heading_dev_sem, _ = _mean_sem(heading_dev_vals)
+        ang_traj_est_mean, ang_traj_est_sem, _ = _mean_sem(ang_traj_change_est_vals)
+        ang_traj_lbl_mean, ang_traj_lbl_sem, _ = _mean_sem(ang_traj_change_lbl_vals)
+
+        # Print with SEM
+        print(f'Average Displacement Error (ADE): {ade_mean:.6f} ± {ade_sem:.6f} (n={n_trajs})')
+        print(f'Final Displacement Error (FDE): {fde_mean:.6f} ± {fde_sem:.6f} (n={n_trajs})')
+        print(f'Angular Displacement Error: {ang_disp_mean:.6f} ± {ang_disp_sem:.6f} (n={n_trajs})')
+        print(f'Heading Deviation Error: {heading_dev_mean:.6f} ± {heading_dev_sem:.6f} (n={n_trajs})')
+        print(f'Average Angular Trajectory Change (Estimates): {ang_traj_est_mean:.6f} ± {ang_traj_est_sem:.6f} (n={n_trajs})')
+        print(f'Average Angular Trajectory Change (Labels): {ang_traj_lbl_mean:.6f} ± {ang_traj_lbl_sem:.6f} (n={n_trajs})')
+
+        # Save metrics + SEMs
         with open(f'{self.sample_save_folder}/metrics.txt', 'w') as file:
-            file.write(f'Average Average Displacement Errors: {average_displacement_errors}\n')
-            file.write(f'Average Final Displacement Errors: {final_displacement_errors}\n')
-            file.write(f'Average Angular Displacement Errors: {angular_displacement_errors}\n')
-            file.write(f'Average Heading Deviation Errors: {heading_deviation_errors}\n')
-            file.write(f'Average Angular Trajectory Change Estimates: {avg_angular_traj_change_estimates}\n')
-            file.write(f'Average Angular Trajectory Change Labels: {avg_angular_traj_change_labels}\n')
+            file.write(f'n_trajs: {n_trajs}\n')
+            file.write(f'ADE: {ade_mean} ± {ade_sem}\n')
+            file.write(f'FDE: {fde_mean} ± {fde_sem}\n')
+            file.write(f'Angular Displacement Error: {ang_disp_mean} ± {ang_disp_sem}\n')
+            file.write(f'Heading Deviation Error: {heading_dev_mean} ± {heading_dev_sem}\n')
+            file.write(f'Average Angular Trajectory Change (Estimates): {ang_traj_est_mean} ± {ang_traj_est_sem}\n')
+            file.write(f'Average Angular Trajectory Change (Labels): {ang_traj_lbl_mean} ± {ang_traj_lbl_sem}\n')
             file.write(f'Interpolate between trajectories: {self.interpolate_between_trajectory}\n')
             file.write(f'Smooth estimate trajectories: {self.smooth_estimate_trajectories}\n')
             file.write(f'Smooth label trajectories: {self.smooth_label_trajectories}\n')
             file.write(f'Smooth robot trajectory: {self.smooth_robot_trajectory}\n')
 
-        # return dict of metrics and params
+        # Return dict (means kept under original keys; SEMs added under *_sem)
         return {
-            'average_displacement_errors': average_displacement_errors,
-            'final_displacement_errors': final_displacement_errors,
-            'angular_displacement_errors': angular_displacement_errors,
-            'heading_deviation_errors': heading_deviation_errors,
-            'avg_angular_traj_change_estimates': avg_angular_traj_change_estimates,
-            'avg_angular_traj_change_labels': avg_angular_traj_change_labels,
-            
+            'average_displacement_errors': ade_mean,
+            'average_displacement_errors_sem': ade_sem,
+            'final_displacement_errors': fde_mean,
+            'final_displacement_errors_sem': fde_sem,
+            'angular_displacement_errors': ang_disp_mean,
+            'angular_displacement_errors_sem': ang_disp_sem,
+            'heading_deviation_errors': heading_dev_mean,
+            'heading_deviation_errors_sem': heading_dev_sem,
+            'avg_angular_traj_change_estimates': ang_traj_est_mean,
+            'avg_angular_traj_change_estimates_sem': ang_traj_est_sem,
+            'avg_angular_traj_change_labels': ang_traj_lbl_mean,
+            'avg_angular_traj_change_labels_sem': ang_traj_lbl_sem,
+
+            'n_trajs': n_trajs,
+
             'interpolate_between_trajectory': self.interpolate_between_trajectory,
             'smooth_estimate_trajectories': self.smooth_estimate_trajectories,
             'smooth_label_trajectories': self.smooth_label_trajectories,
             'smooth_robot_trajectory': self.smooth_robot_trajectory,
-            
+
             'ekf_x_noise': self.ekf_x_noise,
             'ekf_y_noise': self.ekf_y_noise,
             'ekf_yaw_noise': self.ekf_yaw_noise,
@@ -306,6 +331,7 @@ class ObjectLocalizationEvaluator:
             'ekf_x_measurement_noise': self.ekf_x_measurement_noise,
             'ekf_y_measurement_noise': self.ekf_y_measurement_noise
         }
+
         
 def plot_param_vs_metric(results, param_name, metric_name, save_folder, num_iterations=1000, degree=3):
     """Plots EKF parameter vs metric with polynomial regression and saves the plot."""

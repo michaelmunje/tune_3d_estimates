@@ -40,7 +40,6 @@ echo "Running the Docker container..."
 docker run -it --rm \
     --gpus all \
     --name $CONTAINER_NAME \
-    --net=isolated_network \
     --ipc=host \
     --pid=host \
     -e ROS_DOMAIN_ID=42 \
